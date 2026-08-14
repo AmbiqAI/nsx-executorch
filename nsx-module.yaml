@@ -1,0 +1,69 @@
+schema_version: 1
+
+module:
+  name: nsx-executorch
+  type: runtime
+  version: "0.1.0"
+
+support:
+  ambiqsuite: true
+  zephyr: false
+
+summary: >-
+  Thin NSX adapter for unmodified ExecuTorch Cortex-M inference with stock or
+  drop-in CMSIS-NN kernel providers.
+
+license:
+  type: BSD-3-Clause
+  note: >-
+    This repository contains the NSX adapter. ExecuTorch, CMSIS-NN, CMSIS,
+    and torchgen retain their upstream licenses and notices.
+
+capabilities:
+  - executorch
+  - inference
+  - cmsis_nn
+  - cortex_m_kernels
+  - portable_kernels
+  - static_memory
+  - profiling
+
+use_cases:
+  - run a baked ExecuTorch PTE program
+  - collect total and per-operator target measurements
+  - compare stock CMSIS-NN with a source-compatible ns-cmsis-nn provider
+
+agent_keywords:
+  - executorch
+  - pte
+  - pytorch
+  - cortex-m
+  - profiling
+
+build:
+  cmake:
+    package: nsx_executorch
+    targets:
+      - nsx::executorch
+
+depends:
+  required:
+    - nsx-cmsis-core
+    - nsx-core
+    - nsx-soc-hal
+  optional:
+    - nsx-cmsis-nn
+
+compatibility:
+  boards:
+    - apollo510_evb
+    - apollo510b_evb
+    - apollo510dL_evb
+    - apollo330mP_evb
+  socs:
+    - apollo510
+    - apollo510b
+    - apollo510L
+    - apollo330P
+  toolchains:
+    - arm-none-eabi-gcc

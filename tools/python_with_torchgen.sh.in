@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if [ -n "${PYTHONPATH:-}" ]; then
+  export PYTHONPATH="@NSX_EXECUTORCH_TORCHGEN_ROOT@:${PYTHONPATH}"
+else
+  export PYTHONPATH="@NSX_EXECUTORCH_TORCHGEN_ROOT@"
+fi
+
+exec "@NSX_EXECUTORCH_HOST_PYTHON@" "$@"

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  stock-cortex-m-configure:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize pinned source dependencies
+        run: |
+          git submodule update --init external/executorch external/CMSIS-NN external/CMSIS_6
+          git -C external/executorch submodule update --init \
+            backends/xnnpack/third-party/FXdiv \
+            third-party/flatbuffers \
+            third-party/flatcc \
+            third-party/gflags \
+            third-party/json
+
+      - name: Verify source integrity
+        run: python3 tests/verify_source_pins.py
+
+      - name: Configure stock CMSIS-NN with profiling
+        run: cmake -S tests/smoke -B build/configure-smoke -G Ninja
