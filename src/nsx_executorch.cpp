@@ -143,9 +143,18 @@ class OperatorEventTracer final : public executorch::runtime::EventTracer {
 }  // namespace
 
 extern "C" void et_pal_init(void) {
+  // Cortex-M55 implements DWT CYCCNT as an alias of the PMU cycle counter.
+  // Enable the SoC debug clock and the architectural PMU explicitly so cycle
+  // measurement never depends on a debugger having configured them first.
+  (void)am_hal_debug_enable();
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  ARM_PMU_Enable();
+  ARM_PMU_CYCCNT_Reset();
+  ARM_PMU_CNTR_Enable(PMU_CNTENSET_CCNTR_ENABLE_Msk);
   DWT->CYCCNT = 0;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  __DSB();
+  __ISB();
 }
 
 extern "C" void et_pal_abort(void) {
