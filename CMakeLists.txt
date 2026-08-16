@@ -175,6 +175,11 @@ add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
 add_library(nsx::executorch ALIAS nsx_executorch)
 set_target_properties(nsx_executorch PROPERTIES EXPORT_NAME executorch)
 target_compile_features(nsx_executorch PUBLIC cxx_std_17)
+if(NSX_EXECUTORCH_ENABLE_PROFILING)
+  # ExecuTorch applies this definition inside its own source directory. The
+  # adapter lives one directory above it and must opt into the same ABI path.
+  target_compile_definitions(nsx_executorch PRIVATE ET_EVENT_TRACER_ENABLED)
+endif()
 target_include_directories(nsx_executorch PUBLIC
   $<BUILD_INTERFACE:${NSX_EXECUTORCH_ROOT}/includes-api>)
 target_link_libraries(nsx_executorch PUBLIC
