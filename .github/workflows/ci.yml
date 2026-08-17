@@ -46,7 +46,10 @@ jobs:
       - name: Install Cortex-M GCC
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi \
+            libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-dev
 
       - name: Materialize pinned provider modules
         run: |
