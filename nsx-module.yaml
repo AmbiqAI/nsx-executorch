@@ -16,8 +16,10 @@ summary: >-
 license:
   type: BSD-3-Clause
   note: >-
-    This repository contains the NSX adapter. ExecuTorch, CMSIS-NN, CMSIS,
-    and torchgen retain their upstream licenses and notices.
+    This repository contains the NSX adapter. ExecuTorch and torchgen retain
+    their upstream licenses and notices; CMSIS-NN and CMSIS retain their
+    upstream licenses and notices as resolved through the arm-cmsis-nn and
+    nsx-cmsis-nn NSX modules.
 
 capabilities:
   - executorch
@@ -52,6 +54,7 @@ depends:
     - nsx-core
     - nsx-soc-hal
   optional:
+    - arm-cmsis-nn
     - nsx-cmsis-nn
 
 compatibility:
