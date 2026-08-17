@@ -17,7 +17,7 @@ jobs:
 
       - name: Initialize pinned source dependencies
         run: |
-          git submodule update --init external/executorch external/CMSIS-NN external/CMSIS_6
+          git submodule update --init external/executorch
           git -C external/executorch submodule update --init \
             backends/xnnpack/third-party/FXdiv \
             third-party/flatbuffers \
@@ -28,5 +28,8 @@ jobs:
       - name: Verify source integrity
         run: python3 tests/verify_source_pins.py
 
-      - name: Configure stock CMSIS-NN with profiling
-        run: cmake -S tests/smoke -B build/configure-smoke -G Ninja
+      - name: Configure arm provider (CMSIS-NN) with profiling
+        run: cmake -S tests/smoke -B build/configure-smoke-arm -G Ninja
+
+      - name: Configure ns provider (CMSIS-NN) with profiling
+        run: cmake -S tests/smoke-ns -B build/configure-smoke-ns -G Ninja

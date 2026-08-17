@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.24)
+project(nsx_executorch_configure_smoke_ns LANGUAGES C CXX)
+
+add_library(nsx_core INTERFACE)
+add_library(nsx::core ALIAS nsx_core)
+add_library(nsx_cmsis_core INTERFACE)
+add_library(nsx::cmsis_core ALIAS nsx_cmsis_core)
+add_library(nsx_soc_hal INTERFACE)
+add_library(nsx::soc_hal ALIAS nsx_soc_hal)
+add_library(nsx_board_flags INTERFACE)
+add_library(nsx::board_flags ALIAS nsx_board_flags)
+
+set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER ns CACHE STRING "" FORCE)
+set(NSX_EXECUTORCH_ENABLE_PROFILING ON CACHE BOOL "" FORCE)
+get_filename_component(_ns_cmsis_nn_fixture_root
+  "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/ns-cmsis-nn" ABSOLUTE)
+set(NSX_EXECUTORCH_NS_CMSIS_NN_ROOT "${_ns_cmsis_nn_fixture_root}"
+    CACHE PATH "" FORCE)
+add_subdirectory("../.." nsx-executorch)
+
+if(NOT TARGET nsx::executorch)
+  message(FATAL_ERROR "nsx::executorch target was not created")
+endif()
+if(NOT EXECUTORCH_ENABLE_EVENT_TRACER)
+  message(FATAL_ERROR "profiling did not enable stock ExecuTorch EventTracer")
+endif()
+if(NOT CMSIS_NN_LOCAL_PATH MATCHES "fixtures/ns-cmsis-nn$")
+  message(FATAL_ERROR "ns-provider CMSIS-NN source was not selected")
+endif()
+if(TARGET nsx::arm_cmsis_nn)
+  message(FATAL_ERROR
+    "ns provider must not create the arm-only nsx::arm_cmsis_nn target")
+endif()
+if(NOT TARGET cmsis-nn)
+  message(FATAL_ERROR "ns-cmsis-nn drop-in did not create the cmsis-nn target")
+endif()

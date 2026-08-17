@@ -1,9 +1,3 @@
-[submodule "external/CMSIS-NN"]
-	path = external/CMSIS-NN
-	url = https://github.com/ARM-software/CMSIS-NN.git
-[submodule "external/CMSIS_6"]
-	path = external/CMSIS_6
-	url = https://github.com/ARM-software/CMSIS_6.git
 [submodule "external/executorch"]
 	path = external/executorch
 	url = https://github.com/pytorch/executorch.git

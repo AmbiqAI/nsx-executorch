@@ -8,8 +8,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PINS = {
     "external/executorch": "3a97429b0ce0c192861fc3e3729fb81432fd22cf",
-    "external/CMSIS-NN": "d933672e7ca97eec70ef43230baee7b20c2a28ae",
-    "external/CMSIS_6": "7f62ddc8ab8e9af22039912b8f9f46a9290f49ba",
 }
 
 
@@ -48,6 +46,17 @@ def main() -> None:
     manifest = (ROOT / "nsx-module.yaml").read_text(encoding="utf-8")
     version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     assert f'version: "{version}"' in manifest
+
+    # CMSIS-NN and CMSIS_6 must never come back as vendored submodules; both
+    # providers are resolved as NSX module dependencies instead (see
+    # PROVENANCE.md / README.md).
+    gitmodules = (ROOT / ".gitmodules").read_text(encoding="utf-8")
+    for forbidden_submodule in ["CMSIS-NN", "CMSIS_6"]:
+        assert forbidden_submodule not in gitmodules, (
+            f".gitmodules must not reference {forbidden_submodule}"
+        )
+    assert not (ROOT / "external/CMSIS-NN").exists()
+    assert not (ROOT / "external/CMSIS_6").exists()
 
 
 if __name__ == "__main__":

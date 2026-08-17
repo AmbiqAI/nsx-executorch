@@ -24,38 +24,74 @@ endif()
 set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER "arm" CACHE STRING
     "CMSIS-NN provider consumed by stock ExecuTorch: arm or ns")
 set_property(CACHE NSX_EXECUTORCH_CMSIS_NN_PROVIDER PROPERTY STRINGS arm ns)
+set(NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT "" CACHE PATH
+    "Path to a resolved arm-cmsis-nn NSX module checkout (provider=arm)")
 set(NSX_EXECUTORCH_NS_CMSIS_NN_ROOT "" CACHE PATH
-    "Path to a source-compatible ns-cmsis-nn checkout")
+    "Path to a resolved nsx-cmsis-nn (ns-cmsis-nn) NSX module checkout (provider=ns)")
 set(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST "" CACHE STRING
     "Comma-separated portable ATen fallback operators; empty disables them")
 set(NSX_EXECUTORCH_ENABLE_PROFILING OFF CACHE BOOL
     "Enable EventTracer-backed per-operator callbacks")
 
+# Resolve a required NSX module's checkout directory the same way the real
+# NSX tooling does (see neuralspotx's nsx_app_bootstrap.cmake,
+# nsx_module_dir_for_name()): an explicit override wins; otherwise, when this
+# package is consumed from within a bootstrapped NSX app, NSX_ROOT is a
+# plain (non-cache) variable inherited from that app's top-level directory
+# scope, and NSX_APP_MODULE_DIR_<module> overrides a mismatched project/module
+# name (e.g. module nsx-cmsis-nn is vendored from project ns-cmsis-nn). This
+# never guesses sibling directories; standalone/test consumers must supply
+# the explicit override.
+function(_nsx_executorch_resolve_module_root out_var module_name override_value)
+  if(override_value)
+    set(${out_var} "${override_value}" PARENT_SCOPE)
+    return()
+  endif()
+  if(DEFINED NSX_ROOT)
+    string(REPLACE "-" "_" _module_var "${module_name}")
+    set(_dir_var "NSX_APP_MODULE_DIR_${_module_var}")
+    if(DEFINED ${_dir_var})
+      set(${out_var} "${NSX_ROOT}/${${_dir_var}}" PARENT_SCOPE)
+    else()
+      set(${out_var} "${NSX_ROOT}/modules/${module_name}" PARENT_SCOPE)
+    endif()
+    return()
+  endif()
+  set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
 if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm")
-  set(_nsx_executorch_cmsis_nn_root
-      "${NSX_EXECUTORCH_ROOT}/external/CMSIS-NN")
-  set(_nsx_executorch_cmsis_root
-      "${NSX_EXECUTORCH_ROOT}/external/CMSIS_6")
-elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
-  if(NOT NSX_EXECUTORCH_NS_CMSIS_NN_ROOT)
-    set(_nsx_executorch_ns_candidates
-        "${NSX_EXECUTORCH_ROOT}/../ns-cmsis-nn"
-        "${NSX_EXECUTORCH_ROOT}/external/ns-cmsis-nn")
-    foreach(_candidate IN LISTS _nsx_executorch_ns_candidates)
-      if(EXISTS "${_candidate}/CMakeLists.txt")
-        get_filename_component(NSX_EXECUTORCH_NS_CMSIS_NN_ROOT
-            "${_candidate}" ABSOLUTE)
-        break()
-      endif()
-    endforeach()
-  endif()
-  if(NOT EXISTS "${NSX_EXECUTORCH_NS_CMSIS_NN_ROOT}/CMakeLists.txt")
+  _nsx_executorch_resolve_module_root(_nsx_executorch_arm_cmsis_nn_root
+      "arm-cmsis-nn" "${NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT}")
+  if(NOT EXISTS "${_nsx_executorch_arm_cmsis_nn_root}/CMakeLists.txt")
     message(FATAL_ERROR
-      "nsx-executorch: provider=ns requires a source-compatible "
-      "ns-cmsis-nn checkout. Set NSX_EXECUTORCH_NS_CMSIS_NN_ROOT.")
+      "nsx-executorch: provider=arm requires the arm-cmsis-nn NSX module. "
+      "Resolve it as an NSX module dependency or set "
+      "NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT to a checkout of "
+      "AmbiqAI/arm-cmsis-nn.")
   endif()
+  # arm-cmsis-nn vendors upstream CMSIS-NN and CMSIS_6 under its own
+  # external/. Point stock ExecuTorch straight at that pinned source so it
+  # remains the single place that creates the `cmsis-nn` target.
   set(_nsx_executorch_cmsis_nn_root
-      "${NSX_EXECUTORCH_NS_CMSIS_NN_ROOT}")
+      "${_nsx_executorch_arm_cmsis_nn_root}/external/CMSIS-NN")
+  set(_nsx_executorch_cmsis_root
+      "${_nsx_executorch_arm_cmsis_nn_root}/external/CMSIS_6")
+elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
+  _nsx_executorch_resolve_module_root(_nsx_executorch_ns_cmsis_nn_root
+      "nsx-cmsis-nn" "${NSX_EXECUTORCH_NS_CMSIS_NN_ROOT}")
+  if(NOT EXISTS "${_nsx_executorch_ns_cmsis_nn_root}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "nsx-executorch: provider=ns requires the nsx-cmsis-nn NSX module "
+      "(project ns-cmsis-nn). Resolve it as an NSX module dependency or set "
+      "NSX_EXECUTORCH_NS_CMSIS_NN_ROOT to a source-compatible ns-cmsis-nn "
+      "checkout.")
+  endif()
+  # ns-cmsis-nn's package root is a deliberate upstream-compatible drop-in
+  # that creates the same `cmsis-nn` target upstream CMSIS-NN does (its
+  # separate nsx/ integration entry point is not used here).
+  set(_nsx_executorch_cmsis_nn_root
+      "${_nsx_executorch_ns_cmsis_nn_root}")
   # A drop-in ns-cmsis-nn package owns its CMSIS Core discovery contract.
   set(_nsx_executorch_cmsis_root "")
 else()
@@ -170,6 +206,25 @@ function(_nsx_executorch_apply_board_options directory)
   endforeach()
 endfunction()
 _nsx_executorch_apply_board_options("${NSX_EXECUTORCH_SOURCE_ROOT}")
+
+if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm")
+  # Stock ExecuTorch just created the single `cmsis-nn` target above, from
+  # arm-cmsis-nn's own vendored source. Now add arm-cmsis-nn's own
+  # CMakeLists.txt so it can publish its nsx::arm_cmsis_nn contract; it is
+  # written to detect the existing `cmsis-nn` target and skip re-creating it
+  # (see `if(NOT TARGET cmsis-nn)` in arm-cmsis-nn/CMakeLists.txt), so this
+  # never produces a duplicate target.
+  if(NOT DEFINED NSX_BOARD_FLAGS_TARGET)
+    set(NSX_BOARD_FLAGS_TARGET nsx::board_flags)
+  endif()
+  add_subdirectory(
+    "${_nsx_executorch_arm_cmsis_nn_root}"
+    "${CMAKE_CURRENT_BINARY_DIR}/arm-cmsis-nn")
+  if(NOT TARGET nsx::arm_cmsis_nn)
+    message(FATAL_ERROR
+      "nsx-executorch: arm-cmsis-nn did not export nsx::arm_cmsis_nn.")
+  endif()
+endif()
 
 add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
 add_library(nsx::executorch ALIAS nsx_executorch)
