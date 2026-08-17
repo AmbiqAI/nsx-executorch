@@ -1,0 +1,30 @@
+schema_version: 1
+
+module:
+  name: nsx-cmsis-nn
+  type: algorithm
+  version: "7.29.2"
+
+support:
+  ambiqsuite: true
+  zephyr: false
+
+summary: Test fixture for ns-cmsis-nn module layout.
+
+build:
+  cmake:
+    package: nsx_cmsis_nn
+    targets:
+      - nsx::cmsis_nn
+
+depends:
+  required: []
+  optional: []
+
+compatibility:
+  boards:
+    - "*"
+  socs:
+    - "*"
+  toolchains:
+    - arm-none-eabi-gcc

@@ -20,37 +20,42 @@ time, selected by `NSX_EXECUTORCH_CMSIS_NN_PROVIDER`:
 
 | Provider | NSX module | Repository | Exported target | Role |
 | --- | --- | --- | --- | --- |
-| `arm` (default) | `arm-cmsis-nn` | `AmbiqAI/arm-cmsis-nn` | `nsx::arm_cmsis_nn` | Thin wrapper that itself vendors upstream `ARM-software/CMSIS-NN` and `ARM-software/CMSIS_6` under its own `external/`; see that repository's own PROVENANCE.md for exact upstream revisions |
-| `ns` | `nsx-cmsis-nn` | `AmbiqAI/ns-cmsis-nn` (project `ns-cmsis-nn`) | `nsx::cmsis_nn` (separate `nsx/` entry point; not used here) | Ambiq-optimized, source-compatible drop-in replacement for CMSIS-NN |
+| `arm` (default) | `arm-cmsis-nn` | `AmbiqAI/arm-cmsis-nn` | `nsx::arm_cmsis_nn` | `v0.1.0`, commit `6d21a6f821fb72541173a6c4d05d83329fa74f7c`; thin wrapper around its pinned upstream CMSIS-NN and CMSIS 6 submodules |
+| `ns` | `nsx-cmsis-nn` | `AmbiqAI/ns-cmsis-nn` (project `ns-cmsis-nn`) | `nsx::cmsis_nn` | `v7.29.2`, commit `631726420b04860a5c4236956a3741ff5a96bd7f`; Ambiq-optimized kernels with the NSX module entry point under `nsx/` |
 
-For both providers, `nsx-executorch` sets stock ExecuTorch's own
-`CMSIS_NN_LOCAL_PATH` (and, for `arm`, `CMSIS_PATH`) to point at the resolved
-module's source, so ExecuTorch's unmodified `backends/cortex_m/CMakeLists.txt`
-remains the single place that creates the `cmsis-nn` CMake target — no
-duplicate target, no ExecuTorch source patch, and no network `FetchContent`
-fallback.
+`nsx-executorch` sets stock ExecuTorch's `CMSIS_NN_LOCAL_PATH` to a local
+provider adapter. The adapter reuses an existing provider target when NSX
+already configured it, or configures the selected source for standalone use.
+This prevents ExecuTorch's non-idempotent Cortex-M CMake from adding the same
+provider twice. `FETCHCONTENT_FULLY_DISCONNECTED` is forced on, so CMake
+cannot use ExecuTorch's network fallback. Stock ExecuTorch install/export
+rules are suppressed because this repository publishes a build-tree NSX
+target rather than a standalone installed ExecuTorch SDK.
 
-- For `arm`, `CMSIS_NN_LOCAL_PATH`/`CMSIS_PATH` point directly at
-  `arm-cmsis-nn`'s vendored `external/CMSIS-NN` and `external/CMSIS_6`. After
-  ExecuTorch creates `cmsis-nn` from that source, `nsx-executorch` also adds
-  `arm-cmsis-nn`'s own `CMakeLists.txt`, which detects the existing
-  `cmsis-nn` target (it is written as `if(NOT TARGET cmsis-nn) ... endif()`),
-  skips re-creating it, and just attaches NSX board flags plus the
-  `nsx::arm_cmsis_nn` alias.
-- For `ns`, `CMSIS_NN_LOCAL_PATH` points at the resolved `ns-cmsis-nn`
-  package's **root** `CMakeLists.txt`, which is a deliberate
-  upstream-compatible drop-in that creates the `cmsis-nn` target directly
-  from Ambiq's optimized sources. `ns-cmsis-nn` also ships a separate
-  `nsx/CMakeLists.txt` entry point (exporting `nsx::cmsis_nn`, package
-  `nsx_cmsis_nn`) for other NSX consumers; that entry point compiles an
-  unrelated target and is intentionally not used by `nsx-executorch`, since
-  doing so would double-compile the same kernels for no benefit. The `ns`
-  provider is required to implement the same headers, function signatures,
-  behavior, and CMake contract as upstream CMSIS-NN. No ExecuTorch source
-  patch accommodates provider-specific APIs.
+- For `arm`, the adapter reuses the real `cmsis-nn` target exported through
+  `nsx::arm_cmsis_nn`. In standalone mode it adds the provider's pinned
+  `external/CMSIS-NN` source and then adds the wrapper to publish the NSX
+  alias.
+- For `ns`, NSX resolves the module directory to
+  `modules/ns-cmsis-nn/nsx`, while the upstream-compatible source root is its
+  parent. `nsx-executorch` normalizes either form. When `nsx::cmsis_nn`
+  already exists, the adapter creates a single interface `cmsis-nn` bridge;
+  standalone mode adds the repository-root package directly.
 
-Module resolution never guesses sibling directories. It uses an explicit
+NS-CMSIS-NN's stock wrapper signatures diverged at commit
+`cd5f6acfadc29c53145cd2154be3e6f9b58d6631` (first released in v7.2.0):
+`arm_convolve_wrapper_s8`, `arm_depthwise_conv_wrapper_s8`, and
+`arm_transpose_conv_wrapper_s8` require an additional weight-sum context.
+The last stock-signature revision, v7.1.0
+(`d9a614f666fa595bef58778f1a547e4610310e59`), predates NSX module support, so
+it is not a viable provider pin. The private compatibility header in this
+repository extends ExecuTorch's existing temporary buffers, precomputes the
+required sums, and calls the v7.29.2 APIs. The ExecuTorch submodule remains
+unmodified.
+
+Module resolution never guesses sibling projects. It uses an explicit
 cache-variable override (`NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT` /
 `NSX_EXECUTORCH_NS_CMSIS_NN_ROOT`) when set, or the same
 `NSX_ROOT`/`NSX_APP_MODULE_DIR_<module>` contract the NSX tooling itself uses
-to vendor module checkouts when consumed inside a bootstrapped NSX app.
+to vendor module checkouts. The selected optional provider must be a direct
+app dependency listed before `nsx-executorch`.

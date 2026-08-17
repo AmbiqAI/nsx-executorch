@@ -27,7 +27,7 @@ set_property(CACHE NSX_EXECUTORCH_CMSIS_NN_PROVIDER PROPERTY STRINGS arm ns)
 set(NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT "" CACHE PATH
     "Path to a resolved arm-cmsis-nn NSX module checkout (provider=arm)")
 set(NSX_EXECUTORCH_NS_CMSIS_NN_ROOT "" CACHE PATH
-    "Path to a resolved nsx-cmsis-nn (ns-cmsis-nn) NSX module checkout (provider=ns)")
+    "Path to a resolved nsx-cmsis-nn module directory or repository root")
 set(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST "" CACHE STRING
     "Comma-separated portable ATen fallback operators; empty disables them")
 set(NSX_EXECUTORCH_ENABLE_PROFILING OFF CACHE BOOL
@@ -47,7 +47,7 @@ function(_nsx_executorch_resolve_module_root out_var module_name override_value)
     set(${out_var} "${override_value}" PARENT_SCOPE)
     return()
   endif()
-  if(DEFINED NSX_ROOT)
+  if(DEFINED NSX_ROOT AND NSX_ROOT)
     string(REPLACE "-" "_" _module_var "${module_name}")
     set(_dir_var "NSX_APP_MODULE_DIR_${_module_var}")
     if(DEFINED ${_dir_var})
@@ -58,6 +58,20 @@ function(_nsx_executorch_resolve_module_root out_var module_name override_value)
     return()
   endif()
   set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
+function(_nsx_executorch_normalize_ns_root out_var module_dir)
+  get_filename_component(_module_dir "${module_dir}" ABSOLUTE)
+  if(EXISTS "${_module_dir}/Include/arm_nnfunctions.h"
+     AND EXISTS "${_module_dir}/CMakeLists.txt")
+    set(${out_var} "${_module_dir}" PARENT_SCOPE)
+  elseif(EXISTS "${_module_dir}/../Include/arm_nnfunctions.h"
+         AND EXISTS "${_module_dir}/../CMakeLists.txt")
+    get_filename_component(_source_root "${_module_dir}/.." ABSOLUTE)
+    set(${out_var} "${_source_root}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
 endfunction()
 
 if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm")
@@ -78,18 +92,17 @@ if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm")
   set(_nsx_executorch_cmsis_root
       "${_nsx_executorch_arm_cmsis_nn_root}/external/CMSIS_6")
 elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
-  _nsx_executorch_resolve_module_root(_nsx_executorch_ns_cmsis_nn_root
+  _nsx_executorch_resolve_module_root(_nsx_executorch_ns_cmsis_nn_module_dir
       "nsx-cmsis-nn" "${NSX_EXECUTORCH_NS_CMSIS_NN_ROOT}")
-  if(NOT EXISTS "${_nsx_executorch_ns_cmsis_nn_root}/CMakeLists.txt")
+  _nsx_executorch_normalize_ns_root(_nsx_executorch_ns_cmsis_nn_root
+      "${_nsx_executorch_ns_cmsis_nn_module_dir}")
+  if(NOT _nsx_executorch_ns_cmsis_nn_root)
     message(FATAL_ERROR
       "nsx-executorch: provider=ns requires the nsx-cmsis-nn NSX module "
       "(project ns-cmsis-nn). Resolve it as an NSX module dependency or set "
-      "NSX_EXECUTORCH_NS_CMSIS_NN_ROOT to a source-compatible ns-cmsis-nn "
-      "checkout.")
+      "NSX_EXECUTORCH_NS_CMSIS_NN_ROOT to either the repository root or its "
+      "nsx/ module directory.")
   endif()
-  # ns-cmsis-nn's package root is a deliberate upstream-compatible drop-in
-  # that creates the same `cmsis-nn` target upstream CMSIS-NN does (its
-  # separate nsx/ integration entry point is not used here).
   set(_nsx_executorch_cmsis_nn_root
       "${_nsx_executorch_ns_cmsis_nn_root}")
   # A drop-in ns-cmsis-nn package owns its CMSIS Core discovery contract.
@@ -103,6 +116,38 @@ if(NOT EXISTS "${_nsx_executorch_cmsis_nn_root}/CMakeLists.txt")
   message(FATAL_ERROR
     "nsx-executorch: CMSIS-NN source is missing at "
     "'${_nsx_executorch_cmsis_nn_root}'.")
+endif()
+
+# In a bootstrapped NSX app the selected provider must precede this module in
+# nsx.yml. That lets NSX configure the provider exactly once before stock
+# ExecuTorch consumes it. Standalone consumers can instead supply a root
+# override; the provider adapter below configures that source directly.
+if(DEFINED NSX_ROOT AND NSX_ROOT)
+  if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm"
+     AND NOT TARGET nsx::arm_cmsis_nn)
+    message(FATAL_ERROR
+      "nsx-executorch: list arm-cmsis-nn before nsx-executorch in nsx.yml.")
+  elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns"
+         AND NOT TARGET nsx::cmsis_nn)
+    message(FATAL_ERROR
+      "nsx-executorch: list nsx-cmsis-nn before nsx-executorch in nsx.yml.")
+  elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns"
+         AND TARGET cmsis-nn)
+    message(FATAL_ERROR
+      "nsx-executorch: provider=ns found an existing cmsis-nn target. "
+      "Do not include arm-cmsis-nn or another CMSIS-NN provider.")
+  endif()
+endif()
+if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm"
+   AND TARGET cmsis-nn
+   AND NOT TARGET nsx::arm_cmsis_nn)
+  message(FATAL_ERROR
+    "nsx-executorch: provider=arm found an unrecognized cmsis-nn target.")
+elseif(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns"
+       AND TARGET cmsis-nn
+       AND TARGET nsx::arm_cmsis_nn)
+  message(FATAL_ERROR
+    "nsx-executorch: provider=ns cannot reuse arm-cmsis-nn.")
 endif()
 
 # ExecuTorch invokes torchgen during configure and build. Wrap the selected
@@ -139,8 +184,8 @@ else()
 endif()
 
 # Configure only stock, documented ExecuTorch options. CMSIS_NN_LOCAL_PATH is
-# the stock Cortex-M provider hook; both arm and ns providers must satisfy the
-# same source and target contract.
+# the stock Cortex-M provider hook; the local adapter keeps its target creation
+# idempotent for either preconfigured NSX provider.
 set(EXECUTORCH_BUILD_EXECUTOR_RUNNER OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER ON CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR OFF CACHE BOOL "" FORCE)
@@ -165,22 +210,51 @@ set(EXECUTORCH_USE_DL OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_PAL_DEFAULT minimal CACHE STRING "" FORCE)
 set(EXECUTORCH_SELECT_OPS_LIST
     "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}" CACHE STRING "" FORCE)
-set(CMSIS_NN_LOCAL_PATH "${_nsx_executorch_cmsis_nn_root}"
+set(_nsx_executorch_provider_adapter
+    "${CMAKE_CURRENT_BINARY_DIR}/cmsis-nn-provider")
+file(MAKE_DIRECTORY "${_nsx_executorch_provider_adapter}")
+configure_file(
+  "${NSX_EXECUTORCH_ROOT}/cmake/cmsis-nn-provider/CMakeLists.txt"
+  "${_nsx_executorch_provider_adapter}/CMakeLists.txt"
+  COPYONLY)
+file(COPY "${_nsx_executorch_cmsis_nn_root}/Include"
+     DESTINATION "${_nsx_executorch_provider_adapter}")
+set(CMSIS_NN_LOCAL_PATH "${_nsx_executorch_provider_adapter}"
     CACHE PATH "" FORCE)
 if(_nsx_executorch_cmsis_root)
   set(CMSIS_PATH "${_nsx_executorch_cmsis_root}" CACHE PATH "" FORCE)
 endif()
 set(MAX_KERNEL_NUM 64 CACHE STRING "" FORCE)
+set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL
+    "Never fetch dependencies while configuring nsx-executorch" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
 
 # ExecuTorch v1.3.0's schema rule assumes this output directory already exists.
 # Creating a build-tree directory here avoids carrying a source patch.
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/schema/include/executorch/schema")
 
+# This repository is a build-tree NSX module, not an installed ExecuTorch SDK.
+# Suppress the stock subproject's package/export rules: its cmsis-nn export
+# cannot represent an NSX-selected provider and is not consumed by NSX apps.
+set(_nsx_executorch_skip_install_rules "${CMAKE_SKIP_INSTALL_RULES}")
+set(CMAKE_SKIP_INSTALL_RULES ON)
 add_subdirectory(
   "${NSX_EXECUTORCH_SOURCE_ROOT}"
   "${CMAKE_CURRENT_BINARY_DIR}/executorch"
   EXCLUDE_FROM_ALL)
+set(CMAKE_SKIP_INSTALL_RULES "${_nsx_executorch_skip_install_rules}")
+
+# ExecuTorch points cmsis-nn's public include directory at its local provider
+# hook. Restore the selected provider's actual headers after the adapter has
+# made target creation idempotent.
+get_target_property(_nsx_executorch_cmsis_nn_type cmsis-nn TYPE)
+if(_nsx_executorch_cmsis_nn_type STREQUAL "INTERFACE_LIBRARY")
+  target_include_directories(cmsis-nn INTERFACE
+    "$<BUILD_INTERFACE:${_nsx_executorch_cmsis_nn_root}/Include>")
+else()
+  target_include_directories(cmsis-nn PUBLIC
+    "$<BUILD_INTERFACE:${_nsx_executorch_cmsis_nn_root}/Include>")
+endif()
 
 # ExecuTorch creates concrete libraries that do not inherit the NSX board ABI
 # flags. Apply those flags privately across its subproject after target
@@ -207,7 +281,16 @@ function(_nsx_executorch_apply_board_options directory)
 endfunction()
 _nsx_executorch_apply_board_options("${NSX_EXECUTORCH_SOURCE_ROOT}")
 
-if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm")
+if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
+  # NS-CMSIS-NN >= 7.2 adds a weight-sum context to three stock wrapper
+  # signatures. Force-include a private adapter only for ExecuTorch's C++
+  # Cortex-M operators; the provider sources keep their native API.
+  target_compile_options(cortex_m_kernels PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${NSX_EXECUTORCH_ROOT}/includes-private/nsx_cmsis_nn_compat.h>")
+endif()
+
+if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm"
+   AND NOT TARGET nsx::arm_cmsis_nn)
   # Stock ExecuTorch just created the single `cmsis-nn` target above, from
   # arm-cmsis-nn's own vendored source. Now add arm-cmsis-nn's own
   # CMakeLists.txt so it can publish its nsx::arm_cmsis_nn contract; it is

@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PINS = {
     "external/executorch": "3a97429b0ce0c192861fc3e3729fb81432fd22cf",
 }
+PROVIDER_PINS = {
+    "arm-cmsis-nn": "6d21a6f821fb72541173a6c4d05d83329fa74f7c",
+    "nsx-cmsis-nn": "631726420b04860a5c4236956a3741ff5a96bd7f",
+}
 
 
 def git(*args: str, cwd: Path = ROOT) -> str:
@@ -57,6 +61,21 @@ def main() -> None:
         )
     assert not (ROOT / "external/CMSIS-NN").exists()
     assert not (ROOT / "external/CMSIS_6").exists()
+
+    provenance = (ROOT / "PROVENANCE.md").read_text(encoding="utf-8")
+    for module, revision in PROVIDER_PINS.items():
+        assert module in provenance
+        assert revision in provenance
+
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    assert "FETCHCONTENT_FULLY_DISCONNECTED ON" in cmake
+    assert "cmake/cmsis-nn-provider" in cmake
+    assert "nsx_cmsis_nn_compat.h" in cmake
+
+    required_optional = {"arm-cmsis-nn", "nsx-cmsis-nn"}
+    optional_block = manifest.split("optional:", 1)[1]
+    for module in required_optional:
+        assert f"- {module}" in optional_block
 
 
 if __name__ == "__main__":
