@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(nsx_executorch_configure_smoke_ns LANGUAGES C CXX)
+project(nsx_executorch_configure_smoke_ns_ops LANGUAGES C CXX)
 
 add_library(nsx_core INTERFACE)
 add_library(nsx::core ALIAS nsx_core)
@@ -13,15 +13,16 @@ include(GNUInstallDirs)
 
 set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER ns CACHE STRING "" FORCE)
 set(NSX_EXECUTORCH_ENABLE_PROFILING ON CACHE BOOL "" FORCE)
+set(NSX_EXECUTORCH_ENABLE_NS_OPS ON CACHE BOOL "" FORCE)
 get_filename_component(_ns_cmsis_nn_fixture_root
   "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/ns-cmsis-nn" ABSOLUTE)
 set(NSX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(NSX_APP_MODULE_DIR_nsx_cmsis_nn "fixtures/ns-cmsis-nn/nsx")
 add_subdirectory("${_ns_cmsis_nn_fixture_root}/nsx" ns-cmsis-nn-provider)
-install(TARGETS nsx_cmsis_nn EXPORT nsx_executorch_smoke_ns_targets)
-install(EXPORT nsx_executorch_smoke_ns_targets
-        FILE NsxExecutorchSmokeNsTargets.cmake
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/NsxExecutorchSmokeNs")
+install(TARGETS nsx_cmsis_nn EXPORT nsx_executorch_smoke_ns_ops_targets)
+install(EXPORT nsx_executorch_smoke_ns_ops_targets
+        FILE NsxExecutorchSmokeNsOpsTargets.cmake
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/NsxExecutorchSmokeNsOps")
 add_subdirectory("../.." nsx-executorch)
 
 if(NOT TARGET nsx::executorch)
@@ -50,7 +51,14 @@ endif()
 if(NOT FETCHCONTENT_FULLY_DISCONNECTED)
   message(FATAL_ERROR "CMake dependency fetching was not disabled")
 endif()
-if(TARGET cortex_m_ns_kernels OR TARGET cortex_m_ns_ops_lib)
-  message(FATAL_ERROR
-    "cortex_m_ns targets must not exist when NSX_EXECUTORCH_ENABLE_NS_OPS is OFF")
+
+# --- NS additional-kernels gating (NSX_EXECUTORCH_ENABLE_NS_OPS=ON) ---
+if(NOT TARGET cortex_m_ns_kernels)
+  message(FATAL_ERROR "cortex_m_ns_kernels target was not created")
+endif()
+if(NOT TARGET cortex_m_ns_ops_lib)
+  message(FATAL_ERROR "cortex_m_ns_ops_lib target was not created")
+endif()
+if(NOT MAX_KERNEL_NUM EQUAL 96)
+  message(FATAL_ERROR "MAX_KERNEL_NUM was not raised for NS ops")
 endif()
