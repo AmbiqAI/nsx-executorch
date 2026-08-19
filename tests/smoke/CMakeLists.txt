@@ -53,3 +53,7 @@ endif()
 if(NOT FETCHCONTENT_FULLY_DISCONNECTED)
   message(FATAL_ERROR "CMake dependency fetching was not disabled")
 endif()
+if(TARGET cortex_m_ns_kernels OR TARGET cortex_m_ns_ops_lib)
+  message(FATAL_ERROR
+    "cortex_m_ns targets must not exist for the arm provider")
+endif()

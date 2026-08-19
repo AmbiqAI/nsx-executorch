@@ -59,3 +59,16 @@ cache-variable override (`NSX_EXECUTORCH_ARM_CMSIS_NN_ROOT` /
 `NSX_ROOT`/`NSX_APP_MODULE_DIR_<module>` contract the NSX tooling itself uses
 to vendor module checkouts. The selected optional provider must be a direct
 app dependency listed before `nsx-executorch`.
+
+## NS additional kernels (`cortex_m_ns::`)
+
+`NSX_EXECUTORCH_ENABLE_NS_OPS=ON` (ns provider only, default OFF) builds an
+out-of-tree operator library from sources in this repository (`ops-ns/`)
+using stock ExecuTorch codegen (`tools/cmake/Codegen.cmake`) as a public
+extension point. The wrappers call ns-cmsis-nn additional kernels
+(`arm_elementwise_sub_s8`, `arm_hard_swish_precise_s8`, `arm_mean_s8`,
+`arm_relu_generic_s8`/`arm_clamp_s8`, `arm_leaky_relu_s8`) from the already
+pinned ns-cmsis-nn v7.29.2 provider. No new source pins are introduced and
+the ExecuTorch submodule remains unmodified; the new operators live in the
+`cortex_m_ns::` namespace so stock `cortex_m::` PTEs remain portable across
+providers.

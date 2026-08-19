@@ -1,0 +1,41 @@
+# Ambiq ns-cmsis-nn additional operators.
+#
+# These schemas live in the dedicated `cortex_m_ns` namespace, never in the
+# stock `cortex_m` namespace. PTEs that contain only `cortex_m::` operators run
+# on both CMSIS-NN providers; PTEs that contain `cortex_m_ns::` operators fail
+# fast at Method load on provider=arm builds because the kernels below are
+# only registered when NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns and
+# NSX_EXECUTORCH_ENABLE_NS_OPS=ON.
+#
+# Structure mirrors the stock backend yaml at
+# external/executorch/backends/cortex_m/ops/operators.yaml.
+
+- func: cortex_m_ns::quantized_sub.out(Tensor self, int self_zero_point, int self_multiplier, int self_shift, Tensor other, int other_zero_point, int other_multiplier, int other_shift, int output_zero_point, int output_multiplier, int output_shift, int activation_min, int activation_max, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_sub_out
+
+- func: cortex_m_ns::quantized_hardswish.out(Tensor self, int input_zero_point, int output_zero_point, int output_multiplier, int output_shift, int relu_q3, int relu_q6, int prescale, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_hardswish_out
+
+- func: cortex_m_ns::quantized_mean.out(Tensor self, int input_zero_point, int[] axis_mask, bool keepdim, int output_zero_point, int output_multiplier, int output_shift, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_mean_out
+
+- func: cortex_m_ns::quantized_relu.out(Tensor self, int input_zero_point, int output_zero_point, int output_multiplier, int output_shift, int activation_min, int activation_max, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_relu_out
+
+- func: cortex_m_ns::quantized_leaky_relu.out(Tensor self, int input_zero_point, int output_zero_point, int alpha_multiplier, int alpha_shift, int identity_multiplier, int identity_shift, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_leaky_relu_out

@@ -71,6 +71,11 @@ def main() -> None:
     assert "FETCHCONTENT_FULLY_DISCONNECTED ON" in cmake
     assert "cmake/cmsis-nn-provider" in cmake
     assert "nsx_cmsis_nn_compat.h" in cmake
+    # NS additional kernels stay opt-in and out-of-tree: the gating flag must
+    # exist and the cortex_m_ns operator schemas must live in this repo (the
+    # pinned ExecuTorch tree is never modified).
+    assert "NSX_EXECUTORCH_ENABLE_NS_OPS" in cmake
+    assert "ops-ns/operators_ns.yaml" in cmake
 
     required_optional = {"arm-cmsis-nn", "nsx-cmsis-nn"}
     optional_block = manifest.split("optional:", 1)[1]

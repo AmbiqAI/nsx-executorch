@@ -34,6 +34,12 @@ jobs:
       - name: Configure ns provider (CMSIS-NN) with profiling
         run: cmake -S tests/smoke-ns -B build/configure-smoke-ns -G Ninja
 
+      - name: Install NS ops codegen prerequisites
+        run: python3 -m pip install --user pyyaml
+
+      - name: Configure ns provider with NS additional kernels
+        run: cmake -S tests/smoke-ns-ops -B build/configure-smoke-ns-ops -G Ninja
+
       - name: Configure standalone cache overrides
         run: |
           cmake -S tests/smoke-standalone \
@@ -81,3 +87,41 @@ jobs:
             -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
             -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn"
           cmake --build build/real-ns --target cortex_m_kernels --parallel 2
+
+      - name: Build NS additional kernels with real ns provider
+        run: |
+          cmake -S tests/real-provider -B build/real-ns-ops -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON
+          cmake --build build/real-ns-ops \
+            --target cortex_m_ns_kernels cortex_m_ns_ops_lib --parallel 2
+
+  aot-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install AOT toolchain
+        # executorch 1.3.0 has no PyPI wheel; 1.3.1 is the nearest published
+        # release of the pinned v1.3 line. torch is pinned to the 2.12 pairing
+        # executorch 1.3.1 was built against. cmsis_nn provides the Python
+        # package the stock cortex_m backend imports (pin matches the CMSIS-NN
+        # revision vendored by ExecuTorch v1.3).
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install executorch==1.3.1 tosa-tools==2026.2.1 pytest
+          pip install --no-deps \
+            "cmsis_nn @ git+https://github.com/ARM-software/CMSIS-NN.git@d933672e7ca97eec70ef43230baee7b20c2a28ae"
+
+      - name: Run AOT tests
+        run: python -m pytest aot/tests -q

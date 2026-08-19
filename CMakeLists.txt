@@ -32,6 +32,16 @@ set(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST "" CACHE STRING
     "Comma-separated portable ATen fallback operators; empty disables them")
 set(NSX_EXECUTORCH_ENABLE_PROFILING OFF CACHE BOOL
     "Enable EventTracer-backed per-operator callbacks")
+set(NSX_EXECUTORCH_ENABLE_NS_OPS OFF CACHE BOOL
+    "Build and register the cortex_m_ns:: operators backed by ns-cmsis-nn additional kernels (requires provider=ns)")
+
+if(NSX_EXECUTORCH_ENABLE_NS_OPS
+   AND NOT NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
+  message(FATAL_ERROR
+    "nsx-executorch: NSX_EXECUTORCH_ENABLE_NS_OPS requires "
+    "NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns; the cortex_m_ns:: kernels only "
+    "exist in ns-cmsis-nn.")
+endif()
 
 # Resolve a required NSX module's checkout directory the same way the real
 # NSX tooling does (see neuralspotx's nsx_app_bootstrap.cmake,
@@ -224,7 +234,13 @@ set(CMSIS_NN_LOCAL_PATH "${_nsx_executorch_provider_adapter}"
 if(_nsx_executorch_cmsis_root)
   set(CMSIS_PATH "${_nsx_executorch_cmsis_root}" CACHE PATH "" FORCE)
 endif()
-set(MAX_KERNEL_NUM 64 CACHE STRING "" FORCE)
+if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+  # The cortex_m_ns:: operator library registers additional kernels beyond
+  # the stock budget of 64.
+  set(MAX_KERNEL_NUM 96 CACHE STRING "" FORCE)
+else()
+  set(MAX_KERNEL_NUM 64 CACHE STRING "" FORCE)
+endif()
 set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL
     "Never fetch dependencies while configuring nsx-executorch" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
@@ -309,6 +325,64 @@ if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm"
   endif()
 endif()
 
+if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+  # Ambiq ns-cmsis-nn additional kernels: build the out-of-tree cortex_m_ns::
+  # operator library using stock ExecuTorch codegen (public extension point;
+  # the pinned submodule stays untouched). PTEs containing cortex_m_ns:: ops
+  # fail fast at Method load when this block is disabled.
+  #
+  # Codegen additionally needs PyYAML on the host interpreter (the vendored
+  # tools/python tree only covers torchgen + typing_extensions). Fail at
+  # configure time with clear guidance instead of at build time.
+  execute_process(
+    COMMAND "${PYTHON_EXECUTABLE}" -c "import yaml"
+    RESULT_VARIABLE _nsx_executorch_yaml_result
+    OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _nsx_executorch_yaml_result EQUAL 0)
+    message(FATAL_ERROR
+      "nsx-executorch: NSX_EXECUTORCH_ENABLE_NS_OPS needs PyYAML on the host "
+      "Python (${NSX_EXECUTORCH_HOST_PYTHON}) for ExecuTorch codegen. "
+      "Install it (e.g. 'pip install pyyaml') or select a different "
+      "interpreter with -DPython3_EXECUTABLE=...")
+  endif()
+  set(EXECUTORCH_ROOT "${NSX_EXECUTORCH_SOURCE_ROOT}")
+  if(NOT COMMAND gen_selected_ops)
+    include("${NSX_EXECUTORCH_SOURCE_ROOT}/tools/cmake/Codegen.cmake")
+  endif()
+
+  set(_nsx_executorch_ns_ops_yaml
+      "${NSX_EXECUTORCH_ROOT}/ops-ns/operators_ns.yaml")
+  gen_selected_ops(
+    LIB_NAME "cortex_m_ns_ops_lib"
+    OPS_SCHEMA_YAML "${_nsx_executorch_ns_ops_yaml}")
+  generate_bindings_for_kernels(
+    LIB_NAME "cortex_m_ns_ops_lib"
+    CUSTOM_OPS_YAML "${_nsx_executorch_ns_ops_yaml}")
+
+  add_library(cortex_m_ns_kernels STATIC
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_sub.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_hardswish.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_mean.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_relu.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_leaky_relu.cpp")
+  target_link_libraries(cortex_m_ns_kernels
+    PRIVATE cmsis-nn
+    PRIVATE executorch
+    PRIVATE kernels_util_all_deps)
+  target_include_directories(cortex_m_ns_kernels PRIVATE
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/.."
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/runtime/core/portable_type/c10")
+  target_compile_options(cortex_m_ns_kernels PRIVATE
+                         ${_nsx_executorch_board_options})
+
+  gen_operators_lib(
+    LIB_NAME "cortex_m_ns_ops_lib"
+    KERNEL_LIBS cortex_m_ns_kernels
+    DEPS executorch)
+  target_compile_options(cortex_m_ns_ops_lib PRIVATE
+                         ${_nsx_executorch_board_options})
+endif()
+
 add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
 add_library(nsx::executorch ALIAS nsx_executorch)
 set_target_properties(nsx_executorch PROPERTIES EXPORT_NAME executorch)
@@ -329,6 +403,11 @@ target_link_libraries(nsx_executorch PRIVATE
   extension_data_loader
   cortex_m_ops_lib
   cortex_m_kernels)
+if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+  target_link_libraries(nsx_executorch PRIVATE
+    cortex_m_ns_ops_lib
+    cortex_m_ns_kernels)
+endif()
 if(_nsx_executorch_build_portable_ops)
   target_link_libraries(nsx_executorch PRIVATE executorch_kernels)
 endif()
