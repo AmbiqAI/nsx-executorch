@@ -1,0 +1,30 @@
+# helia-torch: PyTorch export tool for the nsx-executorch Cortex-M runtime.
+#
+# Built from the nsx-executorch repository so the AOT lowering passes and the
+# runtime kernel schemas (ops-ns/operators_ns.yaml) stay in version lockstep.
+# The executorch/torch pins below MUST match the repository's pinned
+# external/executorch submodule (see NSX_SOURCE_PINS.md and
+# tests/verify_source_pins.py).
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helia-torch"
+version = "0.1.0"
+description = "Export PyTorch models to ExecuTorch PTEs for Ambiq Cortex-M targets (arm or ns-cmsis-nn kernel providers)"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch==2.12.*",
+    "executorch==1.3.0",
+    "torchao==0.17.*",
+    "numpy",
+]
+
+[project.scripts]
+helia-torch = "nsx_cortex_m.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nsx_cortex_m*"]

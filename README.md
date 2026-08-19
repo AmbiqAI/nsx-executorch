@@ -115,10 +115,43 @@ AOT export (requires a host ExecuTorch install, see `aot/`):
 from nsx_cortex_m import export
 
 result = export(model, example_inputs, kernel_provider="ns")  # or "arm"
-result.write_pte("model.pte")
+result.write_pte("model.pte")           # also writes the model.pte.json sidecar
 print(result.edge_ops)                  # lowered operator histogram
 print(result.portable_select_ops_list)  # NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST value
 ```
+
+## helia-torch CLI and PTE sidecars
+
+`aot/` builds as the `helia-torch` pip package (see `aot/pyproject.toml`;
+its torch/executorch pins must match this repository's pinned submodule).
+The CLI is file-in/file-out: the user runs `torch.export.save()` in their
+own training environment and hands the `.pt2` artifact to the tool — no
+model code executes here.
+
+```sh
+helia-torch compile model.pt2 --provider ns --calibrate calib.npz
+helia-torch report  model.pte    # kernel lowering report from the sidecar
+helia-torch inspect model.pte    # sidecar manifest as JSON
+```
+
+`compile` writes `model.pte` plus a `model.pte.json` sidecar (schema
+`nsx-executorch.pte-manifest/1`), SHA-256-bound to that exact PTE. The
+sidecar records everything a target build needs to register the right
+kernels and size its memory: kernel provider, `requires_ns_ops`, the
+portable select-ops list, the planned arena size, and per-tensor I/O sizes.
+Consumers verify the hash and self-configure — helia-profiler reads it
+automatically, so a profiling config reduces to the model path, this
+checkout's path, and a board. The compile step also prints a lowering
+report that flags any `[PORTABLE]` fallback loudly: a portable op runs on
+the standard float kernels and typically dominates per-op cost on target.
+
+Memory *placement* is intentionally not in the sidecar: sizes are export
+facts, but which RAM region each caller-owned arena lives in is a
+board-pressure decision made by the consumer (helia-profiler's
+`engine.config.*_location` keys, or the application's linker attributes).
+Splitting activations across multiple planned arenas at export time
+(per-tensor placement) is tracked in
+[issue #3](https://github.com/AmbiqAI/nsx-executorch/issues/3).
 
 `kernel_provider="arm"` reproduces the stock flow exactly (zero
 `cortex_m_ns::` ops). With `"ns"`, ops that fail a lowering qualifier stay

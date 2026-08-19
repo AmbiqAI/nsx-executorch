@@ -67,6 +67,8 @@ class ExportResult:
     # Python reference impls); usable for host-side numeric checks. The
     # serialized program uses .out variants which have no host kernels.
     edge_module: Any = None
+    # Provider this program was lowered for; recorded in the sidecar.
+    kernel_provider: str = "arm"
 
     @property
     def portable_select_ops_list(self) -> str:
@@ -74,9 +76,15 @@ class ExportResult:
         covering the aten fallbacks left in this program."""
         return ",".join(sorted(self.portable_fallback_ops))
 
-    def write_pte(self, path) -> None:
+    def write_pte(self, path, sidecar: bool = True) -> None:
+        """Serialize the program; by default also write the `<path>.json`
+        sidecar manifest that target builds use to self-configure."""
         with open(path, "wb") as f:
             f.write(self.executorch_program.buffer)
+        if sidecar:
+            from .manifest import write_sidecar
+
+            write_sidecar(self, path, self.kernel_provider)
 
 
 def _stock_edge_compile_config() -> EdgeCompileConfig:
@@ -129,7 +137,12 @@ def export(
         quantizer = CortexMQuantizer()
         pass_manager_cls = CortexMPassManager
 
-    model = model.eval()
+    try:
+        model = model.eval()
+    except NotImplementedError:
+        # torch.export.ExportedProgram.module() graph modules refuse eval();
+        # they are already in inference form.
+        pass
     exported = torch.export.export(model, example_inputs, strict=True)
     graph_module = exported.module()
 
@@ -161,4 +174,5 @@ def export(
         edge_ops=edge_ops,
         portable_fallback_ops=fallbacks,
         edge_module=edge_module,
+        kernel_provider=kernel_provider,
     )
