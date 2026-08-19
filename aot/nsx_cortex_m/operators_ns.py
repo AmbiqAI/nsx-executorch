@@ -381,7 +381,9 @@ def _mean_stub_output_shape(self: torch.Tensor, dims, keepdim: bool) -> list[int
 @register_fake("cortex_m_ns::mean_stub")
 def mean_stub_meta(self: torch.Tensor, dims, keepdim: bool) -> torch.Tensor:
     return torch.empty(
-        _mean_stub_output_shape(self, dims, keepdim), dtype=self.dtype
+        _mean_stub_output_shape(self, dims, keepdim),
+        dtype=self.dtype,
+        device=self.device,
     )
 
 
