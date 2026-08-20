@@ -77,8 +77,9 @@ jobs:
             -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
             -DNSX_EXECUTORCH_TEST_PROVIDER=arm \
             -DNSX_EXECUTORCH_TEST_MODE=nsx \
-            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn"
-          cmake --build build/real-arm --target cortex_m_kernels --parallel 2
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST="aten::clamp.out,aten::leaky_relu.out,aten::sub.out"
+          cmake --build build/real-arm --target cortex_m_kernels portable_kernels --parallel 2
           cmake -S tests/real-provider -B build/real-ns -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
             -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
@@ -178,8 +179,9 @@ jobs:
             -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
             -DNSX_EXECUTORCH_TEST_PROVIDER=arm \
             -DNSX_EXECUTORCH_TEST_MODE=nsx \
-            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn"
-          cmake --build build/real-arm-atfe --target cortex_m_kernels --parallel 2
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST="aten::clamp.out,aten::leaky_relu.out,aten::sub.out"
+          cmake --build build/real-arm-atfe --target cortex_m_kernels portable_kernels --parallel 2
           cmake -S tests/real-provider -B build/real-ns-atfe -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake" \
             -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
