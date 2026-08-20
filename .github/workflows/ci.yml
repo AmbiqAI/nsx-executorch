@@ -101,6 +101,121 @@ jobs:
           cmake --build build/real-ns-ops \
             --target cortex_m_ns_kernels cortex_m_ns_ops_lib --parallel 2
 
+  atfe-cross-build:
+    runs-on: ubuntu-24.04
+    env:
+      ATFE_VERSION: "22.1.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize pinned source dependencies
+        run: |
+          git submodule update --init external/executorch
+          git -C external/executorch submodule update --init \
+            backends/xnnpack/third-party/FXdiv \
+            third-party/flatbuffers \
+            third-party/flatcc \
+            third-party/gflags \
+            third-party/json
+
+      - name: Verify source integrity
+        run: python3 tests/verify_source_pins.py
+
+      - name: Cache ATfE toolchain
+        id: cache-atfe
+        uses: actions/cache@v4
+        with:
+          path: ~/atfe
+          key: atfe-${{ env.ATFE_VERSION }}-linux-x86_64-newlib
+
+      - name: Install ATfE (with newlib overlay)
+        if: steps.cache-atfe.outputs.cache-hit != 'true'
+        # Same layout as helia-profiler's nix/atfe.nix: the base archive has a
+        # single wrapper directory (strip it); the newlib overlay is rooted at
+        # the toolchain root (extract in place).
+        run: |
+          base_url="https://github.com/arm/arm-toolchain/releases/download/release-${ATFE_VERSION}-ATfE"
+          mkdir -p "$HOME/atfe"
+          curl -fsSL "$base_url/ATfE-${ATFE_VERSION}-Linux-x86_64.tar.xz" \
+            | tar -xJ -C "$HOME/atfe" --strip-components=1
+          curl -fsSL "$base_url/ATfE-newlib-overlay-${ATFE_VERSION}.tar.xz" \
+            | tar -xJ -C "$HOME/atfe"
+
+      - name: Export ATFE_ROOT
+        run: |
+          echo "ATFE_ROOT=$HOME/atfe" >> "$GITHUB_ENV"
+          "$HOME/atfe/bin/clang" --version
+
+      - name: Install NS ops codegen prerequisites
+        run: python3 -m pip install --user pyyaml
+
+      - name: Configure fixtures with ATfE
+        run: |
+          cmake -S tests/smoke -B build/configure-smoke-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake"
+          cmake -S tests/smoke-ns -B build/configure-smoke-ns-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake"
+          cmake -S tests/smoke-ns-ops -B build/configure-smoke-ns-ops-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake"
+
+      - name: Materialize pinned provider modules
+        run: |
+          git clone --quiet --recurse-submodules --branch v0.1.0 --depth 1 \
+            https://github.com/AmbiqAI/arm-cmsis-nn.git \
+            build/providers/arm-cmsis-nn
+          git clone --quiet --branch v7.29.2 --depth 1 \
+            https://github.com/AmbiqAI/ns-cmsis-nn.git \
+            build/providers/ns-cmsis-nn
+          test "$(git -C build/providers/arm-cmsis-nn rev-parse HEAD)" = \
+            6d21a6f821fb72541173a6c4d05d83329fa74f7c
+          test "$(git -C build/providers/ns-cmsis-nn rev-parse HEAD)" = \
+            631726420b04860a5c4236956a3741ff5a96bd7f
+
+      - name: Build Cortex-M kernels with real providers (ATfE)
+        run: |
+          cmake -S tests/real-provider -B build/real-arm-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=arm \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn"
+          cmake --build build/real-arm-atfe --target cortex_m_kernels --parallel 2
+          cmake -S tests/real-provider -B build/real-ns-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn"
+          cmake --build build/real-ns-atfe --target cortex_m_kernels --parallel 2
+
+      - name: Build NS additional kernels with real ns provider (ATfE)
+        run: |
+          cmake -S tests/real-provider -B build/real-ns-ops-atfe -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/atfe.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON
+          cmake --build build/real-ns-ops-atfe \
+            --target cortex_m_ns_kernels cortex_m_ns_ops_lib --parallel 2
+
+      - name: Verify MVE codegen (no scalar fallback)
+        # A regression to integer-only MVE (e.g. an -mfpu flag sneaking back
+        # into the board flags) builds green but silently drops the Helium
+        # float paths; require vector loads/stores in the archives.
+        run: |
+          for lib in \
+            build/real-arm-atfe/nsx-executorch/executorch/backends/cortex_m/libcortex_m_kernels.a \
+            build/real-arm-atfe/arm-cmsis-nn-provider/arm-cmsis-nn-src/libcmsis-nn.a \
+            build/real-ns-atfe/ns-cmsis-nn-provider/libnsx_cmsis_nn.a; do
+            count="$("$HOME/atfe/bin/llvm-objdump" -d "$lib" | grep -cE 'vldrw|vldrb|vstrw')"
+            echo "$lib: $count MVE vector memory instructions"
+            test "$count" -gt 0
+          done
+
   aot-tests:
     runs-on: ubuntu-24.04
     steps:
