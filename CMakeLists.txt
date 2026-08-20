@@ -411,3 +411,48 @@ endif()
 if(_nsx_executorch_build_portable_ops)
   target_link_libraries(nsx_executorch PRIVATE executorch_kernels)
 endif()
+
+# --- Toolchain-specific accommodations (issue #6) ---
+# All per-toolchain branching lives here, in one place. ATfE (upstream LLVM
+# clang, CMAKE_CXX_COMPILER_ID "Clang") is the only non-GCC toolchain
+# currently supported; armclang identifies as "ARMClang" and is out of scope.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  # ATfE's bare-metal libc++ is built without std::random_device (no entropy
+  # source on the target); GCC's libstdc++ provides one unconditionally,
+  # which is why the arm-none-eabi-gcc build never noticed. portable_kernels
+  # compiles every portable source regardless of EXECUTORCH_SELECT_OPS_LIST
+  # (selection only controls registration; --gc-sections strips the rest), so
+  # the three kernels that construct a std::random_device break the ATfE
+  # build even when their ops are never registered. Drop those sources, and
+  # fail loudly if a select list actually asks for them.
+  if(_nsx_executorch_build_portable_ops)
+    if(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST MATCHES
+       "aten::(rand|randn|native_dropout)\\.")
+      message(FATAL_ERROR
+        "nsx-executorch: aten::rand/randn/native_dropout portable kernels "
+        "require std::random_device, which this toolchain's libc++ does not "
+        "provide on bare metal. Remove them from "
+        "NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST or build with "
+        "arm-none-eabi-gcc.")
+    endif()
+    get_target_property(_nsx_executorch_portable_sources
+                        portable_kernels SOURCES)
+    list(FILTER _nsx_executorch_portable_sources
+         EXCLUDE REGEX "op_(rand|randn|native_dropout)\\.cpp$")
+    set_target_properties(portable_kernels PROPERTIES
+      SOURCES "${_nsx_executorch_portable_sources}")
+  endif()
+
+  # The adapter includes am_mcu_apollo.h as C++. AmbiqSuite's HAL detects the
+  # GCC toolchain via __GNUC_STDC_INLINE__, which clang defines in C mode but
+  # not in C++ (armclang is matched via __ARMCC_VERSION instead), so C++
+  # inclusion hits "#error Compiler is unknown". Define it for this target
+  # only; the HAL's guarded declarations are attribute-compatible with clang,
+  # and the corresponding definitions live in HAL C sources where clang
+  # defines the macro natively. The reserved-literal suppression mirrors what
+  # nsx_toolchain_flags.cmake already applies for armclang against the same
+  # headers (C-style literal concatenation without a space).
+  target_compile_definitions(nsx_executorch PRIVATE __GNUC_STDC_INLINE__=1)
+  target_compile_options(nsx_executorch PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-reserved-user-defined-literal>)
+endif()

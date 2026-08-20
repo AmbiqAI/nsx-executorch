@@ -210,3 +210,34 @@ cmake -S tests/smoke-standalone -B build/configure-standalone-ns -G Ninja \
 
 CI additionally builds the stock Cortex-M kernels with the exact Arm and NS
 provider revisions listed in `PROVENANCE.md`.
+
+## Toolchains
+
+The module builds under `arm-none-eabi-gcc` and ATfE (Arm Toolchain for
+Embedded, LLVM-based). `armclang` is not yet supported. Cross-compiling test
+fixtures carry one toolchain file each: `tests/real-provider/arm-none-eabi-gcc.cmake`
+and `tests/real-provider/atfe.cmake` (requires the `ATFE_ROOT` env var pointing
+at an ATfE install with the newlib overlay; skip the ATfE legs when unset).
+All per-toolchain accommodations in the module live in the single
+`CMAKE_CXX_COMPILER_ID STREQUAL "Clang"` block at the end of `CMakeLists.txt`.
+
+Validated: ATfE 22.1.0 (newlib overlay) on Cortex-M55 / Apollo510 EVB, both
+providers, `NSX_EXECUTORCH_ENABLE_NS_OPS` on and off, plus portable ops via
+`NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST=aten::clamp.out,aten::leaky_relu.out,aten::sub.out`
+(the tier-1 arm PTE's fallback list). Hardware numbers for the tier-1 arm PTE (96 MHz LP,
+median of 25, helia-profiler `hpx compare`): total 3.51M cycles (GCC 15.2)
+vs 2.77M cycles (ATfE 22.1.0), −21%; firmware `.text` −5.5%. Most of the
+delta is clang auto-vectorizing float portable kernels with MVE tail
+predication (`aten::clamp.out` 63x); `aten::leaky_relu.out` regressed ~54%
+under ATfE — see the issue #5 flag audit. Numerical parity between the
+toolchains is not yet exercised: `hpx validate` still gates ExecuTorch to
+GCC (AmbiqAI/helia-profiler#141).
+
+Known toolchain differences (issue #6):
+
+- The fixture board flags pass no `-mfpu` for Cortex-M55 (matching NSX's
+  `nsx_apply_toolchain_flags`): an explicit `-mfpu=fpv5-sp-d16` downgrades
+  clang to integer-only MVE (`__ARM_FEATURE_MVE=1`), silently breaking
+  ExecuTorch's Helium float kernels; GCC ignores `-mfpu` for MVE derivation.
+- Upstream CMSIS-NN defaults `CMSIS_OPTIMIZATION_LEVEL` to `-Ofast`, which
+  clang 22 deprecates (warning only).

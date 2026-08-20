@@ -20,12 +20,16 @@ add_library(nsx_board_flags INTERFACE)
 add_library(nsx::board_flags ALIAS nsx_board_flags)
 set(NSX_EXECUTORCH_TEST_CPU "cortex-m55" CACHE STRING
     "CPU used for real-provider compilation")
+# Mirror nsx_apply_toolchain_flags() in neuralspotx: for Cortex-M55 the app
+# passes no -mfpu (NSX_FPU is Cortex-M4 only). An explicit -mfpu=fpv5-sp-d16
+# here would downgrade clang's __ARM_FEATURE_MVE from 3 to 1 (integer-only),
+# breaking ExecuTorch's Helium float paths under ATfE; GCC ignores -mfpu when
+# deriving MVE, which is why the GCC leg never noticed.
 if(NSX_EXECUTORCH_TEST_CPU STREQUAL "cortex-m55")
   target_compile_options(nsx_board_flags INTERFACE
-    -mcpu=cortex-m55
     -mthumb
-    -mfloat-abi=hard
-    -mfpu=fpv5-sp-d16)
+    -mcpu=cortex-m55
+    -mfloat-abi=hard)
 else()
   target_compile_options(nsx_board_flags INTERFACE
     "-mcpu=${NSX_EXECUTORCH_TEST_CPU}"
