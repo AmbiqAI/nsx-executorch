@@ -213,7 +213,11 @@ jobs:
             build/real-arm-atfe/nsx-executorch/executorch/backends/cortex_m/libcortex_m_kernels.a \
             build/real-arm-atfe/arm-cmsis-nn-provider/arm-cmsis-nn-src/libcmsis-nn.a \
             build/real-ns-atfe/ns-cmsis-nn-provider/libnsx_cmsis_nn.a; do
-            count="$("$HOME/atfe/bin/llvm-objdump" -d "$lib" | grep -cE 'vldrw|vldrb|vstrw')"
+            # Run objdump separately so its failures still fail the step;
+            # mask only grep's no-match exit status so a zero count reaches
+            # the echo/test below instead of aborting under bash -e.
+            disasm="$("$HOME/atfe/bin/llvm-objdump" -d "$lib")"
+            count="$(printf '%s' "$disasm" | grep -cE 'vldrw|vldrb|vstrw' || true)"
             echo "$lib: $count MVE vector memory instructions"
             test "$count" -gt 0
           done

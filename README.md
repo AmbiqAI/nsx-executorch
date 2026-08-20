@@ -222,8 +222,9 @@ All per-toolchain accommodations in the module live in the single
 `CMAKE_CXX_COMPILER_ID STREQUAL "Clang"` block at the end of `CMakeLists.txt`.
 
 Validated: ATfE 22.1.0 (newlib overlay) on Cortex-M55 / Apollo510 EVB, both
-providers, `NSX_EXECUTORCH_ENABLE_NS_OPS` on and off, plus the tier-1
-`portable_ops` list. Hardware numbers for the tier-1 arm PTE (96 MHz LP,
+providers, `NSX_EXECUTORCH_ENABLE_NS_OPS` on and off, plus portable ops via
+`NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST=aten::clamp.out,aten::leaky_relu.out,aten::sub.out`
+(the tier-1 arm PTE's fallback list). Hardware numbers for the tier-1 arm PTE (96 MHz LP,
 median of 25, helia-profiler `hpx compare`): total 3.51M cycles (GCC 15.2)
 vs 2.77M cycles (ATfE 22.1.0), −21%; firmware `.text` −5.5%. Most of the
 delta is clang auto-vectorizing float portable kernels with MVE tail
