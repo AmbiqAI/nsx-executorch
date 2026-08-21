@@ -141,15 +141,23 @@ app and etdump, so deltas, not absolutes, are the meaningful numbers).
 | Configuration | text (B) | avg cycles | vs previous ship |
 | --- | --- | --- | --- |
 | Pre-audit (de-facto `-O3 -ffast-math`, verification ON) | 267,376 | 3,507,826 | — |
-| **`speed` defaults** (`-O3 -fno-fast-math`, verification OFF) | 249,992 | 3,637,987 | **−6.5% flash, +3.7% cycles** |
+| **`speed` defaults** (strict math + scoped portable relaxation, verification OFF) | 249,240 | 3,507,316 | **−6.8% flash, latency parity** |
+| `speed`, fully strict math (no portable relaxation) | 249,992 | 3,637,987 | −6.5% flash, +3.7% cycles |
 | `speed` + verification ON | 262,944 | 3,635,204 | verifier = **+12,952 B**, latency unchanged |
-| `size` (`-Os -fno-fast-math`, verification OFF) | 199,160 | 4,874,113 | −25.5% flash, +38.9% cycles |
+| `size` (`-Os`, verification OFF) | 199,160 | 4,874,113 | −25.5% flash, +38.9% cycles |
 
-The +3.7% on the `speed` default is **entirely** the portable
-`aten::leaky_relu.out` fallback (43.7k → 172.8k cycles): without fast-math
-GCC will not vectorize its float compare-select. Every other op is within
-±2% (portable `clamp` improves 3.8%). The ns provider serves leaky_relu with
-a native CMSIS-NN kernel and does not hit this path.
+The +3.7% in the fully strict configuration was **entirely** the portable
+`aten::leaky_relu.out` fallback (43.7k → 172.8k cycles): GCC's vectorizer
+gates float compare-select if-conversion on the
+`-funsafe-math-optimizations` umbrella flag *itself* — bisection showed no
+combination of its documented component flags
+(`-fno-math-errno -ffinite-math-only -fno-signed-zeros -fno-trapping-math`)
+triggers it. Granting that one flag to `portable_kernels` alone (the float
+fallback library, which always shipped under full `-ffast-math` before the
+audit) restores exact latency parity while the runtime, cortex_m kernels,
+and everything else keep strict IEEE semantics. Every other op was within
+±2% throughout. The ns provider serves leaky_relu with a native CMSIS-NN
+kernel and never hits the portable path.
 
 ### tier1_ns (ns provider, ns ops, no portable fallbacks)
 
@@ -168,11 +176,12 @@ unwind/RTTI machinery. Per-layer etdump tracing verified working with the
 - **Default `NSX_EXECUTORCH_OPTIMIZATION=speed`**: `-Os` costs +39% cycles
   on tier1_arm — unacceptable for published latency numbers. `size` remains
   a knob for flash-constrained deployments (−50.8 KB vs speed).
-- **Default `-fno-fast-math` everywhere except the CMSIS-NN provider**:
-  correct float semantics in code we don't own the numerics of, at zero cost
-  on the ns path and +3.7% on tier1_arm concentrated in one fragile portable
-  kernel. If that op matters in an arm-provider deployment, prefer the ns
-  provider (native kernel) over re-enabling fast-math.
+- **Strict float semantics by default, relaxed only for `portable_kernels`**:
+  the runtime and cortex_m kernels build `-fno-fast-math` (with the mild
+  `-fno-math-errno -ffinite-math-only` re-granted); the portable fallback
+  library additionally gets `-funsafe-math-optimizations`, without which GCC
+  refuses to vectorize float compare-selects (4x on leaky_relu). Measured
+  latency parity with the pre-audit full-fast-math ship, at −6.8% flash.
 - **Default `NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF`**: 12,952 B of
   flash for a verifier the adapter never invokes; integrity is covered by
   the sidecar SHA-256. Latency confirmed unaffected either way.
