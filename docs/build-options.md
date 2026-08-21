@@ -130,7 +130,50 @@ The harness now sets `CMAKE_BUILD_TYPE=Release` by default (mirroring
 `-g -O3 -ffast-math`, so the ABI-vs-policy filtering above is exercised by CI
 exactly as in an app build.
 
-## Measurements (Apollo510 EVB, tier1_arm, GCC, 96 MHz LP)
+## Measurements (Apollo510 EVB, GCC 15.2, 96 MHz LP clock)
 
-<!-- MEASUREMENTS -->
+Median of 25 iterations via `hpx profile`; flash = `text` from
+`arm-none-eabi-size` on the profiler firmware (which includes the profiler
+app and etdump, so deltas, not absolutes, are the meaningful numbers).
+
+### tier1_arm (arm provider, 3 portable fallback ops)
+
+| Configuration | text (B) | avg cycles | vs previous ship |
+| --- | --- | --- | --- |
+| Pre-audit (de-facto `-O3 -ffast-math`, verification ON) | 267,376 | 3,507,826 | — |
+| **`speed` defaults** (`-O3 -fno-fast-math`, verification OFF) | 249,992 | 3,637,987 | **−6.5% flash, +3.7% cycles** |
+| `speed` + verification ON | 262,944 | 3,635,204 | verifier = **+12,952 B**, latency unchanged |
+| `size` (`-Os -fno-fast-math`, verification OFF) | 199,160 | 4,874,113 | −25.5% flash, +38.9% cycles |
+
+The +3.7% on the `speed` default is **entirely** the portable
+`aten::leaky_relu.out` fallback (43.7k → 172.8k cycles): without fast-math
+GCC will not vectorize its float compare-select. Every other op is within
+±2% (portable `clamp` improves 3.8%). The ns provider serves leaky_relu with
+a native CMSIS-NN kernel and does not hit this path.
+
+### tier1_ns (ns provider, ns ops, no portable fallbacks)
+
+| Configuration | text (B) | avg cycles |
+| --- | --- | --- |
+| Pre-audit | 225,824 | 2,761,860 |
+| **`speed` defaults** | 209,232 (−7.3%) | 2,762,249 (+0.01%) |
+
+Where CMSIS-NN kernels serve every op, removing `-ffast-math` from the
+runtime is latency-neutral, and the flash win is the verifier plus dead
+unwind/RTTI machinery. Per-layer etdump tracing verified working with the
+`ET_EVENT_TRACER_ENABLED` fix on the ns op library.
+
+### Decisions taken from the data
+
+- **Default `NSX_EXECUTORCH_OPTIMIZATION=speed`**: `-Os` costs +39% cycles
+  on tier1_arm — unacceptable for published latency numbers. `size` remains
+  a knob for flash-constrained deployments (−50.8 KB vs speed).
+- **Default `-fno-fast-math` everywhere except the CMSIS-NN provider**:
+  correct float semantics in code we don't own the numerics of, at zero cost
+  on the ns path and +3.7% on tier1_arm concentrated in one fragile portable
+  kernel. If that op matters in an arm-provider deployment, prefer the ns
+  provider (native kernel) over re-enabling fast-math.
+- **Default `NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF`**: 12,952 B of
+  flash for a verifier the adapter never invokes; integrity is covered by
+  the sidecar SHA-256. Latency confirmed unaffected either way.
 
