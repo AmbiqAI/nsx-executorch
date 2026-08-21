@@ -211,6 +211,19 @@ cmake -S tests/smoke-standalone -B build/configure-standalone-ns -G Ninja \
 CI additionally builds the stock Cortex-M kernels with the exact Arm and NS
 provider revisions listed in `PROVENANCE.md`.
 
+## Build options
+
+`docs/build-options.md` is the audit record for every ExecuTorch option this
+module forces (and the ones it deliberately leaves off), how compiler flags
+reach the subtree, and hardware before/after numbers for the choices that
+were changed. The short version: the module owns the subtree's optimization
+level via `NSX_EXECUTORCH_OPTIMIZATION` (`speed` = `-O3` default, `size` =
+`-Os`), strips the app policy flags (`-O3 -ffast-math`) that the board
+interface would otherwise impose, and defaults
+`NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF` (the sidecar SHA covers PTE
+integrity). Hold `NSX_EXECUTORCH_OPTIMIZATION` constant across arm-vs-ns
+comparisons.
+
 ## Toolchains
 
 The module builds under `arm-none-eabi-gcc` and ATfE (Arm Toolchain for

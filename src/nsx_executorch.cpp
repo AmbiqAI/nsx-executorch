@@ -225,7 +225,15 @@ RunResult run_once_profiled(
 
   ::executorch::runtime::runtime_init();
   BufferDataLoader loader(program_data, program_size);
+#if defined(NSX_EXECUTORCH_VERIFY_PROGRAM)
+  // NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION builds the flatbuffer
+  // verifier, which only executes when requested here; the default argument
+  // is Verification::Minimal.
+  auto program_result =
+      Program::load(&loader, Program::Verification::InternalConsistency);
+#else
   auto program_result = Program::load(&loader);
+#endif
   if (!program_result.ok()) {
     return fail(Stage::kLoadProgram, program_result.error());
   }
