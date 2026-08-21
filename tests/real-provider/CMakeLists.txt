@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
 project(nsx_executorch_real_provider_smoke LANGUAGES C CXX)
 
+# nsx configure always passes -DCMAKE_BUILD_TYPE=Release (neuralspotx
+# project_config.py). Default the harness the same way so it exercises the
+# Release-only flag edits stock ExecuTorch makes; an empty build type used to
+# leave the whole subtree at -O0 while EXECUTORCH_OPTIMIZE_SIZE claimed -Os.
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 foreach(_required
     NSX_EXECUTORCH_TEST_ROOT
     NSX_EXECUTORCH_TEST_PROVIDER
@@ -35,6 +43,20 @@ else()
     "-mcpu=${NSX_EXECUTORCH_TEST_CPU}"
     -mthumb)
 endif()
+# The production interface also carries the app's non-ABI policy flags
+# (nsx_toolchain_flags.cmake): -g -O3 -ffast-math and section/codegen flags.
+# Include them so the module's ABI-vs-policy filtering is exercised by the
+# harness exactly as it is in a bootstrapped NSX app.
+target_compile_options(nsx_board_flags INTERFACE
+  -fshort-enums
+  -ffunction-sections
+  -fdata-sections
+  -fomit-frame-pointer
+  -fno-exceptions
+  -Wall
+  -g
+  -O3
+  -ffast-math)
 include(GNUInstallDirs)
 install(TARGETS nsx_board_flags EXPORT nsx_executorch_real_provider_targets)
 install(EXPORT nsx_executorch_real_provider_targets
