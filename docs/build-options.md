@@ -55,7 +55,7 @@ performance contract, and the arm/ns providers are byte-identical in flags.
 | Knob | Default | Meaning |
 | --- | --- | --- |
 | `NSX_EXECUTORCH_OPTIMIZATION` | `speed` | `speed` = `-O3`, `size` = `-Os` for the ExecuTorch subtree, the codegen'd ops libs, and the adapter. `speed` preserves continuity with all previously published Tier-1 numbers (which were de-facto `-O3`). Hold it constant across arm-vs-ns comparisons. |
-| `NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION` | `OFF` | Forwarded to `EXECUTORCH_ENABLE_PROGRAM_VERIFICATION`. See rationale below. |
+| `NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION` | `OFF` | Forwarded to `EXECUTORCH_ENABLE_PROGRAM_VERIFICATION`, and when ON the adapter also *requests* verification at `Program::load` (`Verification::InternalConsistency`) — the verifier code only executes when asked for. See rationale below. |
 | `NSX_EXECUTORCH_ENABLE_PROFILING` | `OFF` | Forwarded to `EXECUTORCH_BUILD_DEVTOOLS` + `EXECUTORCH_ENABLE_EVENT_TRACER`; adds `ET_EVENT_TRACER_ENABLED` to every consumer-scope target that compiles ExecuTorch headers (see "Definition consistency"). |
 
 ## Forced stock options, and why
@@ -81,7 +81,7 @@ performance contract, and the arm/ns providers are byte-identical in flags.
 | `EXECUTORCH_USE_DL` | OFF | Only gates `find_library(dl)`; no `dl` on newlib. It never defines `ET_USE_LIBDL`, so ON would be a no-op-at-best. |
 | `EXECUTORCH_PAL_DEFAULT` | `minimal` | posix PAL needs a hosted libc. Note `minimal` provides *weak* stubs: `et_pal_current_ticks` returns a sentinel (11223344) — profiling timestamps come from the app's strong override, and `et_pal_abort` is `__builtin_trap()`. |
 | `EXECUTORCH_SELECT_OPS_LIST` | = portable list | Registration-selective build for portable fallbacks. Entries are fully-qualified overload names (`aten::mean.out`). The helia-torch sidecar computes this list per model. |
-| `MAX_KERNEL_NUM` | 64 / 96 (ns ops) | Static registry: 12 B `.bss` per slot. Static-init registrations: 25 prim ops + 16 cortex_m (+5 cortex_m_ns), so 64 leaves 23 slots and 96 leaves 50 for the portable list. Overflow aborts **before `main()` and silently** (logging off + minimal PAL ⇒ `__builtin_trap`), so keep headroom visible. The pinned value also disables ExecuTorch's auto-sizing, which would undercount (it cannot see the cortex_m registrations). |
+| `MAX_KERNEL_NUM` | 64 / 96 (ns ops) | Static registry: 12 B `.bss` per slot. Static-init registrations: 25 prim ops + 16 cortex_m (+5 cortex_m_ns), so 64 leaves 23 slots and 96 leaves 50 for the portable list. Overflow aborts **before `main()` and silently** (logging off + minimal PAL ⇒ `__builtin_trap`), so the module counts the select-ops list at configure time and FATALs when the total would exceed capacity. The pinned value also disables ExecuTorch's auto-sizing, which would undercount (it cannot see the cortex_m registrations). |
 
 ## Options evaluated and deliberately not used
 
@@ -165,7 +165,7 @@ app and etdump, so deltas, not absolutes, are the meaningful numbers).
 | Configuration | text (B) | avg cycles | vs previous ship |
 | --- | --- | --- | --- |
 | Pre-audit (de-facto `-O3 -ffast-math`, verification ON) | 267,376 | 3,507,826 | — |
-| **`speed` defaults** (strict math + scoped portable relaxation, verification OFF) | 249,240 | 3,507,316 | **−6.8% flash, latency parity** |
+| **`speed` defaults** (strict math + scoped portable relaxation, verification OFF) | 249,288 | 3,506,568 | **−6.8% flash, latency parity** |
 | `speed`, fully strict math (no portable relaxation) | 249,992 | 3,637,987 | −6.5% flash, +3.7% cycles |
 | `speed` + verification ON | 262,944 | 3,635,204 | verifier = **+12,952 B**, latency unchanged |
 | `size` (`-Os`, verification OFF) | 199,160 | 4,874,113 | −25.5% flash, +38.9% cycles |
@@ -201,10 +201,16 @@ unwind/RTTI machinery. Per-layer etdump tracing verified working with the
   on tier1_arm — unacceptable for published latency numbers. `size` remains
   a knob for flash-constrained deployments (−50.8 KB vs speed).
 - **Strict float semantics by default, relaxed only for `portable_kernels`**:
-  the runtime and cortex_m kernels build `-fno-fast-math` (with the mild
-  `-fno-math-errno -ffinite-math-only` re-granted); the portable fallback
-  library additionally gets `-funsafe-math-optimizations`, without which GCC
-  refuses to vectorize float compare-selects (4x on leaky_relu). Measured
+  the runtime and cortex_m kernels build `-fno-fast-math` with only
+  `-fno-math-errno` re-granted (errno-on-math is a POSIX convention, not
+  IEEE-754 semantics; NaN/Inf behavior stays strict — `-ffinite-math-only`
+  was initially on the shared carrier and was moved off it in review since
+  it is not IEEE-preserving and measured no benefit there). The portable
+  fallback library alone gets `-funsafe-math-optimizations
+  -ffinite-math-only`: the first is what lets GCC vectorize float
+  compare-selects at all (4x on leaky_relu), and the second is part of the
+  same scaled-integer-range contract — and also required, since GCC 15.2
+  ICEs vectorizing NaN-honoring compares under unsafe-math alone. Measured
   latency parity with the pre-audit full-fast-math ship, at −6.8% flash.
 - **Default `NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION=OFF`**: 12,952 B of
   flash for a verifier the adapter never invokes; integrity is covered by

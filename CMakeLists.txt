@@ -290,6 +290,31 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS)
 else()
   set(MAX_KERNEL_NUM 64 CACHE STRING "" FORCE)
 endif()
+# Overflow otherwise traps at static-init before main() with zero
+# diagnostics, so reject it at configure time. The built-in counts must
+# track the pinned submodule (25: kernels/prim_ops/register_prim_ops.cpp;
+# 16: backends/cortex_m/ops/operators.yaml; 5: ops-ns/operators_ns.yaml) —
+# recount on an ExecuTorch upgrade.
+set(_nsx_executorch_registered_kernels 41)
+if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+  math(EXPR _nsx_executorch_registered_kernels
+       "${_nsx_executorch_registered_kernels} + 5")
+endif()
+if(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST)
+  string(REPLACE "," ";" _nsx_executorch_portable_op_items
+         "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}")
+  list(LENGTH _nsx_executorch_portable_op_items
+       _nsx_executorch_portable_op_count)
+  math(EXPR _nsx_executorch_registered_kernels
+       "${_nsx_executorch_registered_kernels} + ${_nsx_executorch_portable_op_count}")
+endif()
+if(_nsx_executorch_registered_kernels GREATER MAX_KERNEL_NUM)
+  message(FATAL_ERROR
+    "nsx-executorch: ${_nsx_executorch_registered_kernels} kernels would be "
+    "registered but MAX_KERNEL_NUM is ${MAX_KERNEL_NUM}; the overflow would "
+    "abort silently before main(). Shorten "
+    "NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST.")
+endif()
 set(FETCHCONTENT_FULLY_DISCONNECTED ON CACHE BOOL
     "Never fetch dependencies while configuring nsx-executorch" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE OFF)
@@ -364,19 +389,17 @@ add_library(nsx_executorch_abi_flags INTERFACE)
 target_compile_options(nsx_executorch_abi_flags INTERFACE
     ${_nsx_executorch_abi_options})
 add_library(nsx_executorch_module_flags INTERFACE)
-# -fno-fast-math cancels the board policy's -ffast-math bundle; the two flags
-# after it re-grant only its mild guarantees (no errno, no NaN/Inf operands
-# — these kernels run between dequantize/quantize steps, so inputs are scaled
-# integer ranges). They do not permit reassociation or other value-changing
-# rewrites, but they are what lets GCC vectorize float compare-selects
-# (portable leaky_relu was 4x slower without them). Order matters:
-# -fno-fast-math resets both, so they must follow it.
+# -fno-fast-math cancels the board policy's -ffast-math bundle;
+# -fno-math-errno (which must follow it — -fno-fast-math resets it) re-grants
+# the one component that is IEEE-preserving: errno-on-math-calls is a POSIX
+# convention, not IEEE-754 semantics, and nothing here reads it. NaN/Inf
+# behavior and evaluation order stay strict; the portable fallback kernel
+# library alone gets a relaxed contract below.
 target_compile_options(nsx_executorch_module_flags INTERFACE
     ${_nsx_executorch_abi_options}
     ${_nsx_executorch_opt_flag}
     -fno-fast-math
     -fno-math-errno
-    -ffinite-math-only
     -ffunction-sections
     -fdata-sections
     -fno-exceptions
@@ -425,8 +448,13 @@ _nsx_executorch_apply_module_options("${NSX_EXECUTORCH_SOURCE_ROOT}")
 # nsx_executorch_module_flags so it survives that target's -fno-fast-math.
 if(TARGET portable_kernels)
   add_library(nsx_executorch_portable_math_flags INTERFACE)
+  # -ffinite-math-only belongs to the same relaxed contract (scaled-integer
+  # ranges cannot produce NaN/Inf) and is additionally required here: GCC
+  # 15.2 ICEs (arm_expand_vector_compare) vectorizing NaN-honoring float
+  # compares under -funsafe-math-optimizations alone.
   target_compile_options(nsx_executorch_portable_math_flags INTERFACE
-      -funsafe-math-optimizations)
+      -funsafe-math-optimizations
+      -ffinite-math-only)
   set_property(TARGET portable_kernels APPEND PROPERTY
                LINK_LIBRARIES nsx_executorch_portable_math_flags)
 endif()
@@ -535,10 +563,21 @@ add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
 add_library(nsx::executorch ALIAS nsx_executorch)
 set_target_properties(nsx_executorch PROPERTIES EXPORT_NAME executorch)
 target_compile_features(nsx_executorch PUBLIC cxx_std_17)
+# Mirror the directory-scoped ExecuTorch configuration defines, as for the
+# cortex_m_ns targets above: the adapter compiles ExecuTorch headers one
+# directory above the subtree and must see the same configuration.
+# ET_EVENT_TRACER_ENABLED in particular is a header-ABI switch.
+target_compile_definitions(nsx_executorch PRIVATE
+  ET_ENABLE_DEPRECATED_CONSTANT_BUFFER=0
+  ET_MIN_LOG_LEVEL=Info)
 if(NSX_EXECUTORCH_ENABLE_PROFILING)
-  # ExecuTorch applies this definition inside its own source directory. The
-  # adapter lives one directory above it and must opt into the same ABI path.
   target_compile_definitions(nsx_executorch PRIVATE ET_EVENT_TRACER_ENABLED)
+endif()
+if(NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION)
+  # Make the knob true to its name: when the verifier is built, the adapter
+  # requests it at Program::load (Verification::InternalConsistency).
+  target_compile_definitions(nsx_executorch PRIVATE
+    NSX_EXECUTORCH_VERIFY_PROGRAM)
 endif()
 target_include_directories(nsx_executorch PUBLIC
   $<BUILD_INTERFACE:${NSX_EXECUTORCH_ROOT}/includes-api>)
