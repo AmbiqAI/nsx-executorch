@@ -66,7 +66,7 @@ performance contract, and the arm/ns providers are byte-identical in flags.
 | `EXECUTORCH_BUILD_EXTENSION_DATA_LOADER` | ON | `BufferDataLoader` used by the adapter. Pulls in nothing else (it is a dependee of other extensions, never a dependent). |
 | `EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR` | OFF | Only needed for external `.ptd` tensor files; single-PTE named data is handled inside `executorch_core` by `internal::PteDataMap` (`program.cpp`). |
 | `EXECUTORCH_BUILD_EXTENSION_EVALUE_UTIL` / `_RUNNER_UTIL` | OFF | Debug/print helpers for the demo runner. |
-| `EXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP` | OFF | Same rationale as FLAT_TENSOR: external-file case only. |
+| `EXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP` | OFF | Same rationale as FLAT_TENSOR: external-file case only. (Was previously left at its default; pinned after the boolean-option re-audit so a stray plain `EXECUTORCH_*` variable in a consumer superbuild cannot flip it — see "Unforced options" below.) |
 | `EXECUTORCH_BUILD_PORTABLE_OPS` | derived | ON iff `NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST` is non-empty. Note the full ~207-kernel `portable_kernels` glob is always compiled in that case; selection controls *registration*, and `--gc-sections` at the app link drops the unreferenced kernels. |
 | `EXECUTORCH_BUILD_KERNELS_OPTIMIZED` | OFF | Targets AArch64/x86 (sleef, OpenMP); useless on Cortex-M and incompatible with dtype-selective build. |
 | `EXECUTORCH_BUILD_KERNELS_QUANTIZED` | OFF | Quantized ATen fallbacks; the cortex_m/CMSIS-NN path covers the quantized ops we ship. |
@@ -94,6 +94,30 @@ performance contract, and the arm/ns providers are byte-identical in flags.
 | `EXECUTORCH_FLATBUFFERS_MAX_ALIGNMENT` | Left at the ExecuTorch default (1024, vs upstream flatbuffers' 32). Zero runtime cost; must be ≥ the tensor-data alignment chosen at export. |
 | `EXECUTORCH_BUILD_SHARED` | Would force `CMAKE_POSITION_INDEPENDENT_CODE=ON` over the module's explicit OFF. Static-only on bare metal. |
 | `EXECUTORCH_LOG_LEVEL` | Moot while logging is OFF (`ET_MIN_LOG_LEVEL` is passed but unused in that configuration). |
+
+## Unforced options and consumer-superbuild capture
+
+A follow-up adversarial re-audit of every boolean option verified that all
+conditional-default options in `default.cmake` (build-type-, Ethos-U-, or
+host-detection-dependent) are in the forced set, and every option left
+unforced has a constant default that is correct for this target. Two
+systemic caveats worth knowing:
+
+- ExecuTorch's `define_overridable_option` force-caches any *plain*
+  `EXECUTORCH_*` variable visible in the directory scope. Forced options are
+  immune (already in cache), but a consumer superbuild that `set()`s an
+  `EXECUTORCH_*` variable for an unrelated ExecuTorch build can flip an
+  unforced option here. None of the unforced options fail *silently* when
+  flipped (they break loudly at configure or link), so this is a
+  documented hazard rather than a pinning campaign. Similarly, a consumer
+  `EXECUTORCH_BUILD_PRESET_FILE` is honored by the subtree and can change
+  unforced options only.
+- Stock ExecuTorch's `REQUIRES`/conflict guards work correctly for BOOL
+  options but are broken for STRING options (the helpers double-expand the
+  value): the declared mutual exclusion among `SELECT_OPS_LIST/MODEL/YAML`
+  never fires, and mixing them silently unions the op selections. The
+  module therefore rejects `SELECT_OPS_MODEL`/`SELECT_OPS_YAML` itself at
+  configure time.
 
 ## Definition consistency (consumer-scope targets)
 

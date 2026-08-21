@@ -215,6 +215,10 @@ set(EXECUTORCH_BUILD_EXTENSION_DATA_LOADER ON CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_EXTENSION_FLAT_TENSOR OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_EXTENSION_EVALUE_UTIL OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_EXTENSION_RUNNER_UTIL OFF CACHE BOOL "" FORCE)
+# External-.ptd support only; in-PTE named data is served by PteDataMap inside
+# executorch_core. Pinned so a stray plain EXECUTORCH_* variable in a consumer
+# superbuild cannot be captured by ExecuTorch's define_overridable_option.
+set(EXECUTORCH_BUILD_EXTENSION_NAMED_DATA_MAP OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_PORTABLE_OPS "${_nsx_executorch_build_portable_ops}"
     CACHE BOOL "" FORCE)
 set(EXECUTORCH_BUILD_KERNELS_OPTIMIZED OFF CACHE BOOL "" FORCE)
@@ -247,6 +251,20 @@ set(EXECUTORCH_USE_DL OFF CACHE BOOL "" FORCE)
 set(EXECUTORCH_PAL_DEFAULT minimal CACHE STRING "" FORCE)
 set(EXECUTORCH_SELECT_OPS_LIST
     "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}" CACHE STRING "" FORCE)
+# Stock ExecuTorch declares SELECT_OPS_LIST/MODEL/YAML mutually exclusive but
+# its conflict check never fires for STRING options
+# (check_conflicting_options_on double-expands the value); mixing them unions
+# the op sets silently. This module owns SELECT_OPS_LIST, so reject the other
+# two here instead.
+foreach(_conflicting_select EXECUTORCH_SELECT_OPS_MODEL
+                            EXECUTORCH_SELECT_OPS_YAML)
+  if(DEFINED ${_conflicting_select} AND ${_conflicting_select})
+    message(FATAL_ERROR
+      "nsx-executorch: ${_conflicting_select} is not supported; portable "
+      "operator selection is owned by NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST "
+      "(stock ExecuTorch would silently merge the selections).")
+  endif()
+endforeach()
 set(_nsx_executorch_provider_adapter
     "${CMAKE_CURRENT_BINARY_DIR}/cmsis-nn-provider")
 file(MAKE_DIRECTORY "${_nsx_executorch_provider_adapter}")
