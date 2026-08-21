@@ -346,10 +346,19 @@ add_library(nsx_executorch_abi_flags INTERFACE)
 target_compile_options(nsx_executorch_abi_flags INTERFACE
     ${_nsx_executorch_abi_options})
 add_library(nsx_executorch_module_flags INTERFACE)
+# -fno-fast-math cancels the board policy's -ffast-math bundle; the two flags
+# after it re-grant only its mild guarantees (no errno, no NaN/Inf operands
+# — these kernels run between dequantize/quantize steps, so inputs are scaled
+# integer ranges). They do not permit reassociation or other value-changing
+# rewrites, but they are what lets GCC vectorize float compare-selects
+# (portable leaky_relu was 4x slower without them). Order matters:
+# -fno-fast-math resets both, so they must follow it.
 target_compile_options(nsx_executorch_module_flags INTERFACE
     ${_nsx_executorch_abi_options}
     ${_nsx_executorch_opt_flag}
     -fno-fast-math
+    -fno-math-errno
+    -ffinite-math-only
     -ffunction-sections
     -fdata-sections
     -fno-exceptions
