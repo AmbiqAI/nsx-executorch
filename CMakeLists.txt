@@ -395,6 +395,24 @@ function(_nsx_executorch_apply_module_options directory)
 endfunction()
 _nsx_executorch_apply_module_options("${NSX_EXECUTORCH_SOURCE_ROOT}")
 
+# Portable float fallback kernels only: GCC's vectorizer gates float
+# compare-select if-conversion on the -funsafe-math-optimizations umbrella
+# flag itself — no combination of its documented component flags
+# (associative/reciprocal/signed-zeros/trapping) triggers it. Without this,
+# portable leaky_relu runs 4x slower (scalar, 172k vs 44k cycles on the
+# tier-1 model). Scope the relaxed contract to the fallback kernel library
+# alone: these ops process dequantized activations in quantized graphs and
+# shipped under full -ffast-math before the flag audit; the runtime and every
+# other target keep strict float semantics. Linked after
+# nsx_executorch_module_flags so it survives that target's -fno-fast-math.
+if(TARGET portable_kernels)
+  add_library(nsx_executorch_portable_math_flags INTERFACE)
+  target_compile_options(nsx_executorch_portable_math_flags INTERFACE
+      -funsafe-math-optimizations)
+  set_property(TARGET portable_kernels APPEND PROPERTY
+               LINK_LIBRARIES nsx_executorch_portable_math_flags)
+endif()
+
 if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
   # NS-CMSIS-NN >= 7.2 adds a weight-sum context to three stock wrapper
   # signatures. Force-include a private adapter only for ExecuTorch's C++
