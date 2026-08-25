@@ -35,6 +35,17 @@ def _load_pt2(path: Path):
             f"{path}: exported program takes keyword inputs {sorted(kwargs)}; "
             "helia-torch supports positional tensor inputs only."
         )
+    non_tensor = [
+        f"argument {index} ({type(arg).__name__})"
+        for index, arg in enumerate(args)
+        if not isinstance(arg, torch.Tensor)
+    ]
+    if non_tensor:
+        raise SystemExit(
+            f"{path}: exported program takes non-tensor inputs "
+            f"({', '.join(non_tensor)}); helia-torch supports positional "
+            "tensor inputs only."
+        )
     return exported, tuple(args)
 
 

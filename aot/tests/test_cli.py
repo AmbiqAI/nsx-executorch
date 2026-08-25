@@ -100,3 +100,43 @@ def test_export_int8_io_reports_qparams(int8_pt2):
     (in_scale, in_zp, *_rest) = result.io_qparams["inputs"][0]
     assert in_scale > 0
     assert result.io_qparams["outputs"][0][4] == _torch.int8
+
+
+def test_compile_float_pt2_with_int8_io_quantizes_then_strips_boundary(float_pt2, tmp_path):
+    """The quantize-here-then-strip flow: a float .pt2 with --int8-io must be
+    PT2E-quantized inside export() and still serialize an int8 boundary."""
+    out = tmp_path / "float_int8_io.pte"
+    assert _compile(float_pt2, out, "--provider", "arm", "--int8-io") == 0
+    manifest = load_sidecar(out)
+    assert manifest["inputs"][0]["dtype"] == "CHAR"  # ExecuTorch ScalarType name for int8
+    assert manifest["outputs"][0]["dtype"] == "CHAR"
+    assert any("cortex_m" in op for op in manifest["operators"]["cortex_m"])
+
+
+def test_export_int8_io_from_eager_float_model_reports_qparams():
+    import torch as _torch
+
+    from nsx_cortex_m import export
+
+    _torch.manual_seed(0)
+    result = export(
+        ConvReluModel().eval(), _example(), kernel_provider="arm", int8_io=True
+    )
+    assert result.io_qparams["inputs"][0][0] > 0  # scale
+    assert result.io_qparams["outputs"][0][4] == _torch.int8
+
+
+def test_compile_rejects_non_tensor_positional_inputs(tmp_path):
+    import torch as _torch
+
+    class ScaledAdd(_torch.nn.Module):
+        def forward(self, x, factor: int):
+            return x + factor
+
+    exported = _torch.export.export(
+        ScaledAdd().eval(), (ramp_tensor(-2, 2, (4, 8)), 3), strict=True
+    )
+    path = tmp_path / "non_tensor.pt2"
+    _torch.export.save(exported, path)
+    with pytest.raises(SystemExit, match="non-tensor inputs"):
+        _compile(path, tmp_path / "x.pte")
