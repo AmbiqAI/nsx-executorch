@@ -8,6 +8,10 @@
 # produces. That keeps the CLI file-in/file-out (like helia-aot) and avoids
 # executing arbitrary model code: the user runs torch.export in their own
 # training environment, then hands the serialized program to this tool.
+#
+# A float32 .pt2 is PT2E-quantized here (--calibrate) before lowering; an
+# already-INT8 .pt2 skips quantization and goes straight to kernel matching.
+# Both take the same export() path as the Python API.
 
 from __future__ import annotations
 
@@ -20,6 +24,10 @@ from pathlib import Path
 def _load_pt2(path: Path):
     import torch
 
+    # Deserialization resolves quantized_decomposed.* ops for INT8 programs,
+    # which only exist once torchao's PT2E op library is registered.
+    import torchao.quantization.pt2e  # noqa: F401
+
     exported = torch.export.load(str(path))
     args, kwargs = exported.example_inputs
     if kwargs:
@@ -27,7 +35,18 @@ def _load_pt2(path: Path):
             f"{path}: exported program takes keyword inputs {sorted(kwargs)}; "
             "helia-torch supports positional tensor inputs only."
         )
-    return exported.module(), tuple(args)
+    non_tensor = [
+        f"argument {index} ({type(arg).__name__})"
+        for index, arg in enumerate(args)
+        if not isinstance(arg, torch.Tensor)
+    ]
+    if non_tensor:
+        raise SystemExit(
+            f"{path}: exported program takes non-tensor inputs "
+            f"({', '.join(non_tensor)}); helia-torch supports positional "
+            "tensor inputs only."
+        )
+    return exported, tuple(args)
 
 
 def _calibration(spec: str, example: tuple) -> list[tuple]:
@@ -75,12 +94,24 @@ def _calibration(spec: str, example: tuple) -> list[tuple]:
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    from . import export
+    from . import export, is_pt2e_quantized
 
-    model, example = _load_pt2(args.model)
-    calibration = _calibration(args.calibrate, example)
+    exported, example = _load_pt2(args.model)
+    if is_pt2e_quantized(exported):
+        if args.calibrate is not None:
+            raise SystemExit(
+                f"{args.model} is already PT2E-quantized; --calibrate only "
+                "applies when helia-torch performs the quantization."
+            )
+        calibration = None
+    else:
+        calibration = _calibration(args.calibrate or "random:8", example)
     result = export(
-        model, example, kernel_provider=args.provider, calibration_samples=calibration
+        exported,
+        example,
+        kernel_provider=args.provider,
+        calibration_samples=calibration,
+        int8_io=args.int8_io,
     )
     output = args.output or args.model.with_suffix(".pte")
     result.write_pte(output)  # sidecar written alongside
@@ -123,9 +154,15 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     compile_parser = subparsers.add_parser(
-        "compile", help="Quantize and lower a torch.export .pt2 file to a .pte + sidecar"
+        "compile",
+        help=(
+            "Quantize (if float) and lower a torch.export .pt2 file to a "
+            ".pte + sidecar; INT8 .pt2 inputs are lowered as-is"
+        ),
     )
-    compile_parser.add_argument("model", type=Path, help="Input .pt2 (torch.export.save)")
+    compile_parser.add_argument(
+        "model", type=Path, help="Input .pt2 (torch.export.save), float32 or INT8"
+    )
     compile_parser.add_argument(
         "--provider",
         choices=("arm", "ns"),
@@ -134,8 +171,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     compile_parser.add_argument(
         "--calibrate",
-        default="random:8",
-        help="Quantization calibration: 'random:N' or an .npz of sample batches",
+        default=None,
+        help=(
+            "Quantization calibration for float inputs: 'random:N' or an "
+            ".npz of sample batches (default: random:8); invalid for "
+            "already-quantized inputs"
+        ),
+    )
+    compile_parser.add_argument(
+        "--int8-io",
+        action="store_true",
+        help=(
+            "Serialize the method with int8 tensor I/O (like an int8 TFLite "
+            "model) instead of the default float32 boundary; the host must "
+            "then quantize inputs / dequantize outputs itself"
+        ),
     )
     compile_parser.add_argument("-o", "--output", type=Path, help="Output .pte path")
     compile_parser.set_defaults(func=_cmd_compile)
