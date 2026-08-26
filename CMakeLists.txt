@@ -334,6 +334,32 @@ add_subdirectory(
   EXCLUDE_FROM_ALL)
 set(CMAKE_SKIP_INSTALL_RULES "${_nsx_executorch_skip_install_rules}")
 
+# Bare-metal libc++ (e.g. ATfE with newlib) omits std::random_device -- the
+# target has no standard entropy source -- so the train-time RNG kernels fail
+# to compile:
+#     op_native_dropout.cpp: error: no member named 'random_device' in
+#     namespace 'std'
+# (op_rand.cpp and op_randn.cpp carry the same pattern.) Selection via
+# EXECUTORCH_SELECT_OPS_LIST only prunes the registration table; the stock
+# portable_kernels library still compiles every op source. No NSX-profiled
+# model selects these train-time ops, so exclude their sources from
+# compilation here instead of patching the pinned stock tree. Selecting one
+# of them on a bare-metal target fails at link with an undefined kernel
+# symbol, which is the correct failure mode.
+# Scope: only libc++-based cross toolchains (ATfE reports "Clang",
+# armclang "ARMClang") omit std::random_device; GNU libstdc++ ships a
+# pseudo-entropy fallback, so gcc builds keep the full portable kernel
+# set and their binaries stay byte-identical to pre-workaround builds.
+if(_nsx_executorch_build_portable_ops AND TARGET portable_kernels
+   AND CMAKE_CROSSCOMPILING AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set_source_files_properties(
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/kernels/portable/cpu/op_rand.cpp"
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/kernels/portable/cpu/op_randn.cpp"
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/kernels/portable/cpu/op_native_dropout.cpp"
+    TARGET_DIRECTORY portable_kernels
+    PROPERTIES HEADER_FILE_ONLY ON)
+endif()
+
 # ExecuTorch points cmsis-nn's public include directory at its local provider
 # hook. Restore the selected provider's actual headers after the adapter has
 # made target creation idempotent.
@@ -560,6 +586,34 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS)
 endif()
 
 add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
+
+# The pinned Ambiq HAL identifies compilers via __ARMCC_VERSION /
+# __GNUC_STDC_INLINE__ / __IAR_SYSTEMS_ICC__ (am_hal_global.h). clang++
+# (ATfE) predefines __GNUC_GNU_INLINE__ in C++ mode instead of
+# __GNUC_STDC_INLINE__, so including the HAL from this target's C++ source
+# hits "#error Compiler is unknown" even though the SDK's own C sources
+# (C mode defines __GNUC_STDC_INLINE__) and arm-none-eabi-g++ C++ builds
+# compile cleanly. Until the HAL ladder learns clang++, predefine the macro
+# it keys on: in C++ the C99 inline-model macros are informational, and the
+# branch selected declares __attribute__((naked)), which clang supports.
+# armclang identifies as "ARMClang" and takes the __ARMCC_VERSION branch,
+# so this applies to ATfE only.
+# Scoped to the one source that includes the HAL, and to cross-compiled
+# ATfE clang++ only ("Clang"; armclang reports "ARMClang" and takes the
+# HAL's __ARMCC_VERSION branch, host clang never builds this module's
+# firmware), so future nsx_executorch sources and other toolchains keep
+# stock preprocessor behavior and diagnostics.
+#
+# The second property covers a further HAL/clang++ incompatibility seen
+# on Apollo510: am_hal_card.h pastes a string literal against a macro
+# with no space ("[CARD] line %04d - "fmt), the pre-C++11 idiom gcc
+# still accepts as an extension but clang++ rejects as a reserved
+# user-defined literal. Both belong in the nsx-ambiq-sdk HAL long-term.
+if(CMAKE_CROSSCOMPILING AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set_source_files_properties(src/nsx_executorch.cpp PROPERTIES
+    COMPILE_DEFINITIONS "__GNUC_STDC_INLINE__=1"
+    COMPILE_OPTIONS "-Wno-reserved-user-defined-literal")
+endif()
 add_library(nsx::executorch ALIAS nsx_executorch)
 set_target_properties(nsx_executorch PROPERTIES EXPORT_NAME executorch)
 target_compile_features(nsx_executorch PUBLIC cxx_std_17)
