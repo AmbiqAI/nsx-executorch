@@ -32,6 +32,14 @@ struct OperatorEvent {
   OperatorKind kind;
   std::int32_t chain_index;
   std::uint32_t instruction_index;
+  // What the instruction runs, resolved from the program's execution plan.
+  // kKernel: the serialized operator name ("aten::add",
+  // "cortex_m::quantized_conv2d") and its overload ("out"). kDelegate: the
+  // backend id in `name`, `overload` nullptr. Both are nullptr when the plan
+  // does not describe the instruction. The strings point into the caller's
+  // program_data and stay valid exactly as long as it does.
+  const char* name;
+  const char* overload;
 };
 
 using BeginOperatorCallback = std::uint32_t (*)(

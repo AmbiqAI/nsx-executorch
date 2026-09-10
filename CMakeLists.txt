@@ -643,7 +643,10 @@ target_link_libraries(nsx_executorch PRIVATE
   executorch
   extension_data_loader
   cortex_m_ops_lib
-  cortex_m_kernels)
+  cortex_m_kernels
+  # Generated program schema: the adapter reads operator and delegate names
+  # out of the plan for OperatorEvent (an include-only INTERFACE target).
+  program_schema)
 if(NSX_EXECUTORCH_ENABLE_NS_OPS)
   target_link_libraries(nsx_executorch PRIVATE
     cortex_m_ns_ops_lib
