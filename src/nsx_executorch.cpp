@@ -14,6 +14,7 @@
 #include <executorch/runtime/executor/program.h>
 #include <executorch/runtime/platform/platform.h>
 #include <executorch/runtime/platform/runtime.h>
+#include <executorch/schema/program_generated.h>
 
 namespace {
 
@@ -36,9 +37,13 @@ nsx::executorch::RunResult fail(
 
 class OperatorEventTracer final : public executorch::runtime::EventTracer {
  public:
-  explicit OperatorEventTracer(
-      const nsx::executorch::ProfilingCallbacks* callbacks)
-      : callbacks_(callbacks) {}
+  // `plan` is the execution plan of the method being run, or nullptr; it is
+  // only used to name operators and delegates in the events handed to the
+  // callbacks.
+  OperatorEventTracer(
+      const nsx::executorch::ProfilingCallbacks* callbacks,
+      const executorch_flatbuffer::ExecutionPlan* plan)
+      : callbacks_(callbacks), plan_(plan) {}
 
   void create_event_block(const char*) override {}
 
@@ -70,9 +75,10 @@ class OperatorEventTracer final : public executorch::runtime::EventTracer {
     if (debug_handle == executorch::runtime::kUnsetDebugHandle) {
       debug_handle = current_debug_handle();
     }
-    const nsx::executorch::OperatorEvent event = {
+    nsx::executorch::OperatorEvent event = {
         kind, static_cast<std::int32_t>(chain_id),
-        static_cast<std::uint32_t>(debug_handle)};
+        static_cast<std::uint32_t>(debug_handle), nullptr, nullptr};
+    resolve_identity(event);
     entry.event_id = callbacks_->begin_operator(callbacks_->user_data, event);
     entry.chain_id = chain_id;
     entry.debug_handle = debug_handle;
@@ -137,8 +143,78 @@ class OperatorEventTracer final : public executorch::runtime::EventTracer {
       executorch::runtime::EventTracerFilterBase*) override {}
 
  private:
+  // Method::execute() traces OPERATOR_CALL/DELEGATE_CALL with the chain index
+  // and the instruction index within that chain as the debug handle, so the
+  // pair addresses one Instruction in the plan. Method::init() already
+  // resolved every KernelCall/DelegateCall through these same tables; the
+  // bounds checks here only keep an out-of-plan event from being named.
+  void resolve_identity(nsx::executorch::OperatorEvent& event) const {
+    if (plan_ == nullptr || plan_->chains() == nullptr || event.chain_index < 0 ||
+        static_cast<std::uint32_t>(event.chain_index) >= plan_->chains()->size()) {
+      return;
+    }
+    const auto* chain = plan_->chains()->Get(event.chain_index);
+    if (chain == nullptr || chain->instructions() == nullptr ||
+        event.instruction_index >= chain->instructions()->size()) {
+      return;
+    }
+    const auto* instruction = chain->instructions()->Get(event.instruction_index);
+    if (instruction == nullptr) {
+      return;
+    }
+    switch (event.kind) {
+      case nsx::executorch::OperatorKind::kKernel: {
+        const auto* call = instruction->instr_args_as_KernelCall();
+        if (call == nullptr || plan_->operators() == nullptr || call->op_index() < 0 ||
+            static_cast<std::uint32_t>(call->op_index()) >= plan_->operators()->size()) {
+          return;
+        }
+        const auto* op = plan_->operators()->Get(call->op_index());
+        if (op == nullptr || op->name() == nullptr) {
+          return;
+        }
+        event.name = op->name()->c_str();
+        event.overload = op->overload() != nullptr ? op->overload()->c_str() : nullptr;
+        return;
+      }
+      case nsx::executorch::OperatorKind::kDelegate: {
+        const auto* call = instruction->instr_args_as_DelegateCall();
+        if (call == nullptr || plan_->delegates() == nullptr || call->delegate_index() < 0 ||
+            static_cast<std::uint32_t>(call->delegate_index()) >= plan_->delegates()->size()) {
+          return;
+        }
+        const auto* delegate = plan_->delegates()->Get(call->delegate_index());
+        if (delegate == nullptr || delegate->id() == nullptr) {
+          return;
+        }
+        event.name = delegate->id()->c_str();
+        return;
+      }
+    }
+  }
+
   const nsx::executorch::ProfilingCallbacks* callbacks_;
+  const executorch_flatbuffer::ExecutionPlan* plan_;
 };
+
+// The execution plan behind a method name. Program keeps its flatbuffer root
+// private, so re-read it from the same bytes Program::load() just accepted
+// (the root table sits at offset 0 of a .pte; segments follow it).
+const executorch_flatbuffer::ExecutionPlan* find_execution_plan(
+    const void* program_data, const char* method_name) {
+  const auto* program = executorch_flatbuffer::GetProgram(program_data);
+  if (program == nullptr || program->execution_plan() == nullptr ||
+      method_name == nullptr) {
+    return nullptr;
+  }
+  for (const auto* plan : *program->execution_plan()) {
+    if (plan != nullptr && plan->name() != nullptr &&
+        std::strcmp(plan->name()->c_str(), method_name) == 0) {
+      return plan;
+    }
+  }
+  return nullptr;
+}
 
 }  // namespace
 
@@ -274,13 +350,13 @@ RunResult run_once_profiled(
   MemoryManager memory_manager(
       &method_allocator, &planned_memory, &temporary_allocator);
 
-  OperatorEventTracer event_tracer(profiling);
+  const bool profiled =
+      profiling != nullptr && profiling->begin_operator != nullptr;
+  OperatorEventTracer event_tracer(
+      profiling,
+      profiled ? find_execution_plan(program_data, *method_name_result) : nullptr);
   auto method_result = program.load_method(
-      *method_name_result,
-      &memory_manager,
-      (profiling != nullptr && profiling->begin_operator != nullptr)
-          ? &event_tracer
-          : nullptr);
+      *method_name_result, &memory_manager, profiled ? &event_tracer : nullptr);
   if (!method_result.ok()) {
     return fail(Stage::kLoadMethod, method_result.error(), 0, 0, planned_bytes);
   }

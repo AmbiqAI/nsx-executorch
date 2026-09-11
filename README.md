@@ -70,9 +70,12 @@ Enable layer callbacks with:
 set(NSX_EXECUTORCH_ENABLE_PROFILING ON CACHE BOOL "" FORCE)
 ```
 
-The callbacks report ExecuTorch chain and instruction identifiers. A caller
-such as Helia Profiler can map those identifiers to exported model metadata
-and sample PMU counters around every operator.
+Each callback receives an `OperatorEvent`: the ExecuTorch chain and
+instruction identifiers plus what the instruction runs — the serialized
+operator name and overload (`aten::add` / `out`,
+`cortex_m::quantized_conv2d` / `out`) for kernel calls, the backend id for
+delegate calls. A caller such as Helia Profiler labels its per-layer rows from
+the name and samples PMU counters around every operator.
 
 ## NS additional kernels (`cortex_m_ns::`)
 
