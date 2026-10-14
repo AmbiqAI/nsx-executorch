@@ -412,3 +412,78 @@ class NsQuantizedOpFusionPass(QuantizedOpFusionPass):
 
         new_op, new_args, new_kwargs = replacement
         return ExportPass.call_operator(self, new_op, new_args, new_kwargs, meta)
+
+
+class NsCloneDimOrderRewritePass(ExportPass):
+    """Lower an int8 ``dim_order_ops::_clone_dim_order`` node to
+    ``cortex_m::transpose`` when doing so is provably safe (nsx-executorch#11).
+
+    ``_clone_dim_order`` only ever changes a tensor's *physical* dim_order —
+    its logical shape never changes (``_clone_dim_order_out``'s runtime
+    check derives the target strides from ``out.sizes()``, which always
+    equals ``input.sizes()``). ``cortex_m::transpose`` is a real permute:
+    its runtime kernel (``transpose_out`` in ``op_transpose.cpp``) reads
+    ``out.size(i)`` directly to build the CMSIS-NN output-dims struct,
+    independent of ``input.size()`` — it trusts the *declared* output shape
+    rather than deriving it from ``perm``, so a non-identity ``perm``
+    genuinely reshapes the tensor. Consumers downstream of a channels_last
+    activation (e.g. ``cortex_m::quantized_depthwise_conv2d``, whose
+    kernel reads ``input.size(1)`` as the channel count regardless of
+    physical layout — see ``quantized_depthwise_conv2d_meta``'s
+    ``memory_format=torch.channels_last`` output construction) require
+    that original logical shape to survive unchanged.
+
+    That makes only the identity-permutation case — a ``_clone_dim_order``
+    whose input and output dim_order already match — a safe drop-in:
+    ``cortex_m::transpose(x, identity)`` is shape-preserving by
+    construction, exactly like ``_clone_dim_order`` was. A genuinely
+    differing dim_order (e.g. contiguous -> channels_last) would need a
+    real reshape, which breaks any consumer relying on the original shape;
+    there is no way to encode that safely through the existing
+    ``cortex_m::transpose`` op, so those cases stay on the portable
+    fallback pending a dedicated kernel.
+    """
+
+    _TARGET = exir_ops.edge.dim_order_ops._clone_dim_order.default
+
+    def call_operator(self, op, args, kwargs, meta):
+        if op != self._TARGET:
+            return super().call_operator(op, args, kwargs, meta)
+
+        output_val = meta.data.get("val")
+        input_val = args[0].data
+        if not isinstance(output_val, torch.Tensor) or not isinstance(
+            input_val, torch.Tensor
+        ):
+            return super().call_operator(op, args, kwargs, meta)
+        if output_val.dtype != torch.int8:
+            return super().call_operator(op, args, kwargs, meta)
+
+        rank = input_val.dim()
+        if rank < 1 or rank > 4 or output_val.dim() != rank:
+            return super().call_operator(op, args, kwargs, meta)
+
+        try:
+            input_dim_order = list(input_val.dim_order())
+            output_dim_order = list(output_val.dim_order())
+        except (NotImplementedError, RuntimeError):
+            return super().call_operator(op, args, kwargs, meta)
+
+        if input_dim_order != output_dim_order:
+            # A genuine relayout: see the class docstring for why this
+            # can't be lowered to cortex_m::transpose safely yet.
+            logger.info(
+                "NS: _clone_dim_order %s -> %s changes dim_order; "
+                "no safe cortex_m lowering, skipping",
+                input_dim_order,
+                output_dim_order,
+            )
+            return super().call_operator(op, args, kwargs, meta)
+
+        identity_perm = list(range(rank))
+        return super().call_operator(
+            exir_ops.edge.cortex_m.transpose.default,
+            (args[0], identity_perm),
+            {},
+            meta,
+        )

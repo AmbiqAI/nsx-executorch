@@ -38,6 +38,7 @@ from torch.export import ExportedProgram
 
 from .passes_ns import (
     NsActivationRewritePass,
+    NsCloneDimOrderRewritePass,
     NsQuantizedOpFusionPass,
     NsStubCapturePass,
 )
@@ -50,6 +51,11 @@ from .passes_ns import (
 #   cortex_m_ns::quantized_hardswish in the fusion pass.
 # - QuantizedOpFusionPass replaced by NsQuantizedOpFusionPass (adds sub,
 #   hardswish, mean and leaky_relu lowerings on top of the stock cases).
+# - NsCloneDimOrderRewritePass added at the end: lowers int8
+#   dim_order_ops::_clone_dim_order to cortex_m::transpose where safe
+#   (nsx-executorch#11). Runs after ConvertToCortexMPass's substitutions so
+#   it only ever needs to consider clone nodes, not interfere with the
+#   aten.convolution -> cortex_m dialect-op rewriting pass order.
 NS_PASS_LIST = [
     RemoveGetItemPass,
     NsStubCapturePass,
@@ -61,6 +67,7 @@ NS_PASS_LIST = [
     QuantizedClampActivationPass,
     NsQuantizedOpFusionPass,
     ConvertToCortexMPass,
+    NsCloneDimOrderRewritePass,
 ]
 
 # Differences from the stock pass_list_transform_for_annotation:
