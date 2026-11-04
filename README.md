@@ -160,6 +160,37 @@ checkout's path, and a board. The compile step also prints a lowering
 report that flags any `[PORTABLE]` fallback loudly: a portable op runs on
 the standard float kernels and typically dominates per-op cost on target.
 
+### Selective operator registration
+
+ExecuTorch registers kernels in a static table at init, so every registered
+operator, and the CMSIS-NN kernels it calls, is linked whether or not the
+model uses it. By default this module registers all 16 stock `cortex_m::`
+operators (and all `cortex_m_ns::` operators with
+`NSX_EXECUTORCH_ENABLE_NS_OPS`). For a deployment build, register just what
+the model uses, which the sidecar already lists:
+
+```cmake
+# From <model>.pte.json: operators.cortex_m and operators.cortex_m_ns
+set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
+    "cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out"
+    CACHE STRING "" FORCE)
+set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST
+    "cortex_m_ns::quantized_conv2d_ws.out" CACHE STRING "" FORCE)
+```
+
+With a list, the module generates its own registration library for exactly
+those operators over the stock `cortex_m_kernels` (the pinned tree is
+untouched) and links it instead of stock `cortex_m_ops_lib`; unregistered
+kernels are never referenced and stay out of the image. Names are checked
+against the operator schemas at configure time. As with
+`NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST`, a PTE that needs an operator
+outside the list fails at `Method::load` with a missing-operator error, so
+keep the lists empty (register all) for firmware that loads arbitrary models.
+
+Measured on an Apollo510 EVB with an MLPerf Tiny KWS DS-CNN (5 `cortex_m::`
+and 2 `cortex_m_ns::` operators): `.text` 224,564 to 188,604 bytes
+(-35.1 KiB, -16%), cycles unchanged.
+
 Memory *placement* is intentionally not in the sidecar: sizes are export
 facts, but which RAM region each caller-owned arena lives in is a
 board-pressure decision made by the consumer (helia-profiler's

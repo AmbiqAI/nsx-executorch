@@ -142,6 +142,44 @@ jobs:
             done
           done
 
+      - name: Build with selective operator registration
+        run: |
+          cmake -S tests/real-provider -B build/real-ns-select -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
+            -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST="cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out" \
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST="cortex_m_ns::quantized_conv2d_ws.out"
+          cmake --build build/real-ns-select \
+            --target nsx_cortex_m_ops_lib cortex_m_ns_ops_lib --parallel 2
+          # The registration libraries must reference exactly the selection.
+          registered() {
+            arm-none-eabi-nm -C -u "$(find build/real-ns-select -name "lib$1.a" | head -n1)" |
+              grep -oE 'cortex_m(_ns)?::native::[a-z0-9_]+_out' | sort -u | tr '\n' ' '
+          }
+          got="$(registered nsx_cortex_m_ops_lib)"
+          want="cortex_m::native::dequantize_per_tensor_out cortex_m::native::quantize_per_tensor_out cortex_m::native::quantized_linear_out "
+          test "$got" = "$want" || { echo "::error::cortex_m registrations: $got"; exit 1; }
+          got="$(registered cortex_m_ns_ops_lib)"
+          test "$got" = "cortex_m_ns::native::quantized_conv2d_ws_out " || {
+            echo "::error::cortex_m_ns registrations: $got"; exit 1; }
+          # An unknown operator name must fail at configure time.
+          if cmake -S tests/real-provider -B build/real-ns-select-typo -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+              -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+              -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+              -DNSX_EXECUTORCH_TEST_MODE=nsx \
+              -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+              -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+              -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST="cortex_m::quantised_add.out"; then
+            echo "::error::misspelled select-ops entry was accepted"
+            exit 1
+          fi
+
   atfe-cross-build:
     runs-on: ubuntu-24.04
     env:
