@@ -142,6 +142,33 @@ jobs:
             done
           done
 
+      - name: Build the HeliaAotBackend runtime
+        run: |
+          # nsx_executorch itself needs the Ambiq HAL, which this standalone test does not provide, so
+          # compile the backend's two translation units directly.
+          cmake -S tests/real-provider -B build/real-ns-haot -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+            -DNSX_EXECUTORCH_ENABLE_HELIA_AOT=ON
+          objects="$(ninja -C build/real-ns-haot -t targets all | grep -oE '[^ :]*src/(helia_aot_backend\.cpp|nsx_helia_aot_registry\.c)\.obj' | sort -u)"
+          test "$(echo "$objects" | wc -l)" -eq 2
+          ninja -C build/real-ns-haot $objects
+          # heliaAOT modules link ns-cmsis-nn: the arm provider must be rejected.
+          if cmake -S tests/real-provider -B build/real-arm-haot -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+              -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+              -DNSX_EXECUTORCH_TEST_PROVIDER=arm \
+              -DNSX_EXECUTORCH_TEST_MODE=nsx \
+              -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+              -DNSX_EXECUTORCH_ENABLE_HELIA_AOT=ON; then
+            echo "::error::NSX_EXECUTORCH_ENABLE_HELIA_AOT was accepted with the arm provider"
+            exit 1
+          fi
+
       - name: Build with selective operator registration
         run: |
           cmake -S tests/real-provider -B build/real-ns-select -G Ninja \
@@ -326,6 +353,13 @@ jobs:
           pip install "scikit-build-core[pyproject]>=0.7,<0.8" "pybind11>=2.10"
           pip install --no-deps --no-build-isolation \
             "cmsis_nn @ git+https://github.com/ARM-software/CMSIS-NN.git@d933672e7ca97eec70ef43230baee7b20c2a28ae"
+          # helia-aot delegate (aot/nsx_cortex_m/helia_aot): heliaAOT itself, and ns-cmsis-nn sources for
+          # the host bit-exactness tests of the generated code.
+          pip install "helia-aot>=1.3,<2"
+          git clone --quiet --branch v7.47.0 --depth 1 \
+            https://github.com/AmbiqAI/ns-cmsis-nn.git build/providers/ns-cmsis-nn-7.47
 
       - name: Run AOT tests
+        env:
+          NSX_EXECUTORCH_TEST_NS_CMSIS_NN_ROOT: ${{ github.workspace }}/build/providers/ns-cmsis-nn-7.47
         run: python -m pytest aot/tests -q

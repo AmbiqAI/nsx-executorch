@@ -15,7 +15,7 @@
 # it fails fast at Method load on provider=arm builds.
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
 from executorch.backends.cortex_m.passes.cortex_m_pass_manager import (
@@ -28,6 +28,9 @@ from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
 from .pass_manager_ns import NsCortexMPassManager
 from .quantizer_ns import NsCortexMQuantizer
+
+if TYPE_CHECKING:
+    from .helia_aot import HeliaAotOptions
 
 # Aten ops that the NS flow tries to accelerate. Anything from this set left
 # in the final graph fell back to the portable path (a qualifier failed) and
@@ -193,6 +196,7 @@ def export(
     calibration_samples: Optional[Sequence[tuple[Any, ...]]] = None,
     target_config: Optional[CortexMTargetConfig] = None,
     int8_io: bool = False,
+    helia_aot: Optional["HeliaAotOptions"] = None,
 ) -> ExportResult:
     """Quantize (if needed), lower and serialize `model` for the provider.
 
@@ -211,6 +215,11 @@ def export(
     `ExportResult.io_qparams` — the caller is then responsible for
     quantizing inputs and dequantizing outputs on the host side. The
     default keeps the float32 method boundary.
+
+    With `helia_aot=HeliaAotOptions(output_dir=...)` (kernel_provider="ns"),
+    the subgraphs heliaAOT can compile are delegated to HeliaAotBackend: each
+    becomes a heliaAOT NSX module in output_dir, and the PTE calls it through
+    the delegate. Everything else lowers as usual. See helia_aot/.
 
     Returns an ExportResult with the ExecutorchProgramManager, the edge op
     histogram and the list of NS-candidate aten ops that stayed on the
@@ -266,10 +275,15 @@ def export(
             "outputs": quantize_outputs.dequant_args,
         }
 
-    pass_manager = pass_manager_cls(
-        edge_manager.exported_program(), target_config=target_config
-    )
-    edge_manager._edge_programs["forward"] = pass_manager.transform()
+    if helia_aot is None:
+        pass_manager = pass_manager_cls(
+            edge_manager.exported_program(), target_config=target_config
+        )
+        edge_manager._edge_programs["forward"] = pass_manager.transform()
+    else:
+        if kernel_provider != "ns":
+            raise ValueError("helia_aot needs kernel_provider='ns' (heliaAOT links ns-cmsis-nn)")
+        edge_manager = _lower_with_helia_aot(edge_manager, helia_aot, target_config)
 
     edge_ops = _count_edge_ops(edge_manager.exported_program())
     fallbacks = sorted(
@@ -286,3 +300,45 @@ def export(
         kernel_provider=kernel_provider,
         io_qparams=io_qparams,
     )
+
+
+def _lower_with_helia_aot(edge_manager, options, target_config):
+    """NS passes up to ConvertToCortexMPass, delegate to heliaAOT, then the rest of the NS passes.
+
+    The partitioner and HeliaAotBackend read the program in that intermediate form (float qparams still
+    attached to every quantized node); the remaining passes then lower what stays in ExecuTorch.
+    """
+    from executorch.backends.cortex_m.passes.convert_to_cortex_m_pass import ConvertToCortexMPass
+
+    from . import pass_manager_ns
+    from .helia_aot import HeliaAotPartitioner
+    from .helia_aot.frontend import retype_quantized_outputs
+
+    passes = pass_manager_ns.NS_PASS_LIST
+    cut = passes.index(ConvertToCortexMPass)
+    edge_manager._edge_programs["forward"] = NsCortexMPassManager(
+        edge_manager.exported_program(), passes=passes[:cut], target_config=target_config
+    ).transform()
+    retype_quantized_outputs(edge_manager.exported_program())
+    edge_manager = edge_manager.to_backend(HeliaAotPartitioner(options))
+    # preprocess() has consumed each partition in this intermediate form. Finish lowering the partitions'
+    # original programs too: ExecuTorch fake-runs them to type the delegate outputs, and in the cut form
+    # aten.linear/convolution still promote to int32 instead of producing int8. Lowered, each original
+    # program is exactly the non-delegated computation the delegate replaces.
+    _finish_delegate_originals(edge_manager.exported_program(), passes[cut:], target_config)
+    edge_manager._edge_programs["forward"] = NsCortexMPassManager(
+        edge_manager.exported_program(), passes=passes[cut:], target_config=target_config
+    ).transform()
+    return edge_manager
+
+
+def _finish_delegate_originals(ep, passes, target_config) -> None:
+    from executorch.exir.lowered_backend_module import LoweredBackendModule
+
+    from .helia_aot.blob import BACKEND_ID
+
+    for module in ep.graph_module.modules():
+        if isinstance(module, LoweredBackendModule) and module.backend_id == BACKEND_ID:
+            module._original_exported_program = NsCortexMPassManager(
+                module.original_module, passes=passes, target_config=target_config
+            ).transform()
