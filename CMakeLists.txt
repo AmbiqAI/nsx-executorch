@@ -280,11 +280,11 @@ if(_nsx_executorch_cmsis_root)
   set(CMSIS_PATH "${_nsx_executorch_cmsis_root}" CACHE PATH "" FORCE)
 endif()
 # Static kernel-registry capacity (12 bytes of .bss per slot on 32-bit).
-# Registrations at static-init time: 25 prim ops + 16 cortex_m ops (+5
+# Registrations at static-init time: 25 prim ops + 16 cortex_m ops (+7
 # cortex_m_ns ops), plus one per entry in
 # NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST. Overflow aborts before main() —
 # silently, since logging is off and the minimal PAL traps — so keep visible
-# headroom: 64 leaves 23 portable slots, 96 leaves 50.
+# headroom: 64 leaves 23 portable slots, 96 leaves 48 (with ns ops).
 if(NSX_EXECUTORCH_ENABLE_NS_OPS)
   set(MAX_KERNEL_NUM 96 CACHE STRING "" FORCE)
 else()
@@ -293,12 +293,12 @@ endif()
 # Overflow otherwise traps at static-init before main() with zero
 # diagnostics, so reject it at configure time. The built-in counts must
 # track the pinned submodule (25: kernels/prim_ops/register_prim_ops.cpp;
-# 16: backends/cortex_m/ops/operators.yaml; 5: ops-ns/operators_ns.yaml) —
+# 16: backends/cortex_m/ops/operators.yaml; 7: ops-ns/operators_ns.yaml) —
 # recount on an ExecuTorch upgrade.
 set(_nsx_executorch_registered_kernels 41)
 if(NSX_EXECUTORCH_ENABLE_NS_OPS)
   math(EXPR _nsx_executorch_registered_kernels
-       "${_nsx_executorch_registered_kernels} + 5")
+       "${_nsx_executorch_registered_kernels} + 7")
 endif()
 if(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST)
   string(REPLACE "," ";" _nsx_executorch_portable_op_items
@@ -552,12 +552,14 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS)
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_hardswish.cpp"
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_mean.cpp"
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_relu.cpp"
-    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_leaky_relu.cpp")
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_leaky_relu.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_conv2d_ws.cpp")
   target_link_libraries(cortex_m_ns_kernels
     PRIVATE cmsis-nn
     PRIVATE executorch
     PRIVATE kernels_util_all_deps)
   target_include_directories(cortex_m_ns_kernels PRIVATE
+    "${NSX_EXECUTORCH_ROOT}/includes-private"
     "${NSX_EXECUTORCH_SOURCE_ROOT}/.."
     "${NSX_EXECUTORCH_SOURCE_ROOT}/runtime/core/portable_type/c10")
   target_link_libraries(cortex_m_ns_kernels PRIVATE

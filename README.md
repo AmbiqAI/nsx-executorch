@@ -93,7 +93,8 @@ the name and samples PMU counters around every operator.
 The ns provider ships kernels beyond stock CMSIS-NN. This repo can expose a
 first tier of them — `sub`, `hardswish`, `mean`, standalone
 `relu`/`relu6`/`hardtanh`/`clamp`, and `leaky_relu` — to ExecuTorch models as
-quantized int8 operators in a dedicated `cortex_m_ns::` namespace. Everything
+quantized int8 operators in a dedicated `cortex_m_ns::` namespace, and lowers
+convolutions with their weight sums precomputed (below). Everything
 composes stock ExecuTorch through public extension points (`ops-ns/` operator
 YAML + codegen, `aot/nsx_cortex_m/` Python package); the pinned submodule is
 never modified.
@@ -186,6 +187,39 @@ Tier 1 restrictions (documented qualifiers; anything else falls back):
 - `leaky_relu`: compile-time positive slope (two AOT requant pairs).
 - `hardswish`: uses `arm_hard_swish_precise_s8` with `prescale=0` (matches
   the pinned ns-cmsis-nn unit tests; guarded by `relu_q6 ≤ 2^22`).
+
+### Export-time weight sums (`quantized_conv2d_ws`, `quantized_depthwise_conv2d_ws`)
+
+ns-cmsis-nn's MVE convolution kernels read a per-output-channel weight-sum
+buffer, `input_offset * sum(weights of channel j) + bias[j]` (int32,
+wrapping). The stock `cortex_m::quantized_conv2d` /
+`quantized_depthwise_conv2d` reach ns-cmsis-nn through the private adapter,
+which has no per-operator state and recomputes that buffer on every
+inference; heliaRT computes it once at Prepare. With the ns profile,
+`NsConvWeightSumPass` (after the stock `ConvertToCortexMPass`) computes it
+once at export and rewrites every conv and depthwise conv with constant
+weights to the matching `cortex_m_ns::*_ws` operator, which takes the sums as
+a constant int32 `[out_ch]` tensor. ns-cmsis-nn documents the buffer as read
+only and reusable while filter, bias and input offset are unchanged, which
+holds for constants.
+
+- Numerics are unchanged: the operators run the same kernels (including the
+  3x3 depthwise routing above) with the same buffer contents.
+- `weight_sum_format` (currently 1) versions the layout. The runtime rejects
+  other values at execution, and the sidecar records it as
+  `weight_sum_format`, so a provider that changes the layout fails loudly
+  instead of computing wrong outputs. Bump `WEIGHT_SUM_FORMAT`
+  (`aot/nsx_cortex_m/weight_sums_ns.py`) and `kWeightSumFormat`
+  (`ops-ns/op_quantized_conv2d_ws.cpp`) together.
+- The PTE grows by 4 bytes per output channel per layer; on builds without
+  MVE the kernels take no weight sums and the tensor is ignored.
+- Like every `cortex_m_ns::` operator, such PTEs need a runtime built with
+  `NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns` and `NSX_EXECUTORCH_ENABLE_NS_OPS=ON`.
+
+Measured on an Apollo510 EVB (Cortex-M55 at 96 MHz, ns-cmsis-nn 7.47.0)
+with an MLPerf Tiny KWS DS-CNN exported through helia-torch, same weights
+with and without the pass: 1,675,317 to 1,653,132 cycles per inference
+(-1.3%), about -2.2k cycles per 3x3 depthwise layer and -1.7k per 1x1 conv.
 
 Follow-up tiers (later PRs): sigmoid/tanh int16, data-movement ops, further
 reductions, LSTM/SVDF.

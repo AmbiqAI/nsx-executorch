@@ -39,3 +39,20 @@
   kernels:
     - arg_meta: null
       kernel_name: cortex_m_ns::quantized_leaky_relu_out
+
+# Stock cortex_m::quantized_conv2d / quantized_depthwise_conv2d with the
+# ns-cmsis-nn per-output-channel weight sums precomputed at export time
+# (int32 [out_ch]: input_offset * sum(weights of channel j) + bias[j]).
+# weight_sum_format versions that layout (kWeightSumFormat in
+# op_quantized_conv2d_ws.cpp, WEIGHT_SUM_FORMAT in aot/nsx_cortex_m).
+- func: cortex_m_ns::quantized_conv2d_ws.out(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, int input_offset, int output_offset, Tensor requantize_multipliers, Tensor requantize_shifts, int activation_min, int activation_max, Tensor weight_sum, int weight_sum_format, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_conv2d_ws_out
+
+- func: cortex_m_ns::quantized_depthwise_conv2d_ws.out(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, int depth_multiplier, int input_offset, int output_offset, Tensor requantize_multipliers, Tensor requantize_shifts, int activation_min, int activation_max, Tensor weight_sum, int weight_sum_format, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_depthwise_conv2d_ws_out

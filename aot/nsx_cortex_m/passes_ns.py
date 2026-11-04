@@ -20,13 +20,22 @@ from executorch.backends.cortex_m.passes.passes_utils import (
 from executorch.backends.cortex_m.passes.quantized_op_fusion_pass import (
     QuantizedOpFusionPass,
 )
+from executorch.backends.transforms.utils import (
+    create_constant_placeholder,
+    get_param_tensor,
+    is_param_node,
+)
+from executorch.backends.xnnpack._passes.xnnpack_pass import XNNPACKPass
 from executorch.exir.dialects._ops import ops as exir_ops
 from executorch.exir.pass_base import ExportPass
+from torch.export.graph_signature import InputKind
+from torch.fx.passes.infra.pass_manager import PassResult
 
 from .operators_ns import (  # noqa: F401  (registers the cortex_m_ns library)
     IDENTITY_REQUANT_MULTIPLIER,
     IDENTITY_REQUANT_SHIFT,
 )
+from .weight_sums_ns import conv_weight_sums, depthwise_weight_sums, WEIGHT_SUM_FORMAT
 
 logger = logging.getLogger(__name__)
 
@@ -412,3 +421,88 @@ class NsQuantizedOpFusionPass(QuantizedOpFusionPass):
 
         new_op, new_args, new_kwargs = replacement
         return ExportPass.call_operator(self, new_op, new_args, new_kwargs, meta)
+
+
+class _NotConstant(Exception):
+    """A conv weight or bias that is not a graph constant."""
+
+
+class NsConvWeightSumPass(XNNPACKPass):
+    """Precompute ns-cmsis-nn weight sums for conv and depthwise conv.
+
+    Runs after the stock ConvertToCortexMPass. Each
+    cortex_m::quantized_conv2d / quantized_depthwise_conv2d whose weight
+    (and bias, if any) is a constant becomes the matching
+    cortex_m_ns::*_ws operator with an int32 [out_ch] weight-sum constant:
+
+        weight_sum[j] = input_offset * sum(weights of channel j) + bias[j]
+
+    so the runtime no longer recomputes it on every inference (heliaRT does
+    the same once at Prepare). The math and outputs are unchanged. Layers
+    whose weight or bias is not a constant keep the stock operator.
+    """
+
+    _REWRITES = {
+        exir_ops.edge.cortex_m.quantized_conv2d.default: (
+            exir_ops.edge.cortex_m_ns.quantized_conv2d_ws.default,
+            conv_weight_sums,
+            6,  # input_offset index in the stock args
+        ),
+        exir_ops.edge.cortex_m.quantized_depthwise_conv2d.default: (
+            exir_ops.edge.cortex_m_ns.quantized_depthwise_conv2d_ws.default,
+            depthwise_weight_sums,
+            7,
+        ),
+    }
+
+    def _constant(self, node):
+        if node is None:
+            return None
+        if not isinstance(node, torch.fx.Node) or not is_param_node(
+            self.exported_program, node
+        ):
+            raise _NotConstant
+        return get_param_tensor(self.exported_program, node)
+
+    def call(self, graph_module: torch.fx.GraphModule) -> PassResult:
+        modified = False
+        for node in list(graph_module.graph.nodes):
+            if node.op != "call_function" or node.target not in self._REWRITES:
+                continue
+            ns_op, weight_sums, offset_index = self._REWRITES[node.target]
+            weight_node, bias_node = node.args[1], node.args[2]
+            try:
+                weight = self._constant(weight_node)
+                bias = self._constant(bias_node)
+            except _NotConstant:
+                logger.debug("%s: weight or bias is not a constant; keeping the stock op", node.name)
+                continue
+            if weight is None:
+                continue
+            weight_sum = weight_sums(weight, bias, int(node.args[offset_index]))
+
+            with graph_module.graph.inserting_after(weight_node):
+                weight_sum_node = create_constant_placeholder(
+                    self.exported_program,
+                    graph_module.graph,
+                    node.name + "_weight_sum",
+                    InputKind.PARAMETER,
+                    weight_sum,
+                )
+            with graph_module.graph.inserting_before(node):
+                ns_node = graph_module.graph.create_node(
+                    "call_function",
+                    target=ns_op,
+                    args=(*node.args, weight_sum_node, WEIGHT_SUM_FORMAT),
+                    kwargs={},
+                )
+            ns_node.meta = node.meta
+            node.replace_all_uses_with(ns_node)
+            graph_module.graph.erase_node(node)
+            modified = True
+
+        if modified:
+            graph_module.graph.eliminate_dead_code()
+            graph_module.recompile()
+            graph_module = super().call(graph_module).graph_module
+        return PassResult(graph_module, modified)

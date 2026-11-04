@@ -396,3 +396,127 @@ def mean_stub_impl(self: torch.Tensor, dims, keepdim: bool) -> torch.Tensor:
         .round()
         .to(self.dtype)
     )
+
+
+# ===================================================================
+# quantized_conv2d_ws / quantized_depthwise_conv2d_ws
+#
+# The stock cortex_m conv / depthwise conv with the ns-cmsis-nn weight sums
+# precomputed at export time (NsConvWeightSumPass) and passed as a constant
+# int32 [out_ch] tensor, plus the layout version (weight_sums_ns). Shape
+# inference and reference numerics are the stock operators'; the weight sums
+# do not change the math, only where it is computed. The reference impls
+# re-derive the sums and check them, so host numerics tests also guard the
+# precomputed constants.
+# ===================================================================
+
+from executorch.backends.cortex_m.ops.operators import (  # noqa: E402
+    quantized_conv2d_impl as _stock_conv2d_impl,
+    quantized_conv2d_meta as _stock_conv2d_meta,
+    quantized_depthwise_conv2d_impl as _stock_dw_conv2d_impl,
+    quantized_depthwise_conv2d_meta as _stock_dw_conv2d_meta,
+)
+
+from .weight_sums_ns import (  # noqa: E402
+    conv_weight_sums,
+    depthwise_weight_sums,
+    WEIGHT_SUM_FORMAT,
+)
+
+_CONV_WS_ARGS = (
+    "Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, "
+    "int[] dilation, int input_offset, int output_offset, "
+    "Tensor requantize_multipliers, Tensor requantize_shifts, "
+    "int activation_min, int activation_max, "
+    "Tensor weight_sum, int weight_sum_format"
+)
+_DW_CONV_WS_ARGS = (
+    "Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, "
+    "int[] dilation, int depth_multiplier, int input_offset, int output_offset, "
+    "Tensor requantize_multipliers, Tensor requantize_shifts, "
+    "int activation_min, int activation_max, "
+    "Tensor weight_sum, int weight_sum_format"
+)
+
+ns_lib.define(f"quantized_conv2d_ws({_CONV_WS_ARGS}) -> Tensor")
+ns_lib.define(f"quantized_conv2d_ws.out({_CONV_WS_ARGS}, *, Tensor(a!) out) -> Tensor(a!)")
+ns_lib.define(f"quantized_depthwise_conv2d_ws({_DW_CONV_WS_ARGS}) -> Tensor")
+ns_lib.define(
+    f"quantized_depthwise_conv2d_ws.out({_DW_CONV_WS_ARGS}, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+def _check_weight_sum(
+    op: str,
+    expected: torch.Tensor,
+    weight_sum: torch.Tensor,
+    weight_sum_format: int,
+) -> None:
+    if weight_sum_format != WEIGHT_SUM_FORMAT:
+        raise RuntimeError(
+            f"{op}: weight_sum_format {weight_sum_format} != {WEIGHT_SUM_FORMAT}"
+        )
+    if not torch.equal(weight_sum.to(torch.int32).flatten(), expected):
+        raise RuntimeError(f"{op}: precomputed weight_sum does not match the weights")
+
+
+@register_fake("cortex_m_ns::quantized_conv2d_ws")
+def quantized_conv2d_ws_meta(
+    input, weight, bias, stride, padding, dilation, input_offset, output_offset,
+    requantize_multipliers, requantize_shifts, activation_min, activation_max,
+    weight_sum, weight_sum_format,
+) -> torch.Tensor:
+    return _stock_conv2d_meta(
+        input, weight, bias, stride, padding, dilation, input_offset, output_offset,
+        requantize_multipliers, requantize_shifts, activation_min, activation_max,
+    )
+
+
+@impl(ns_lib, "quantized_conv2d_ws", "CompositeExplicitAutograd")
+def quantized_conv2d_ws_impl(
+    input, weight, bias, stride, padding, dilation, input_offset, output_offset,
+    requantize_multipliers, requantize_shifts, activation_min, activation_max,
+    weight_sum, weight_sum_format,
+) -> torch.Tensor:
+    _check_weight_sum(
+        "quantized_conv2d_ws",
+        conv_weight_sums(weight, bias, input_offset),
+        weight_sum,
+        weight_sum_format,
+    )
+    return _stock_conv2d_impl(
+        input, weight, bias, stride, padding, dilation, input_offset, output_offset,
+        requantize_multipliers, requantize_shifts, activation_min, activation_max,
+    )
+
+
+@register_fake("cortex_m_ns::quantized_depthwise_conv2d_ws")
+def quantized_depthwise_conv2d_ws_meta(
+    input, weight, bias, stride, padding, dilation, depth_multiplier, input_offset,
+    output_offset, requantize_multipliers, requantize_shifts, activation_min,
+    activation_max, weight_sum, weight_sum_format,
+) -> torch.Tensor:
+    return _stock_dw_conv2d_meta(
+        input, weight, bias, stride, padding, dilation, depth_multiplier, input_offset,
+        output_offset, requantize_multipliers, requantize_shifts, activation_min,
+        activation_max,
+    )
+
+
+@impl(ns_lib, "quantized_depthwise_conv2d_ws", "CompositeExplicitAutograd")
+def quantized_depthwise_conv2d_ws_impl(
+    input, weight, bias, stride, padding, dilation, depth_multiplier, input_offset,
+    output_offset, requantize_multipliers, requantize_shifts, activation_min,
+    activation_max, weight_sum, weight_sum_format,
+) -> torch.Tensor:
+    _check_weight_sum(
+        "quantized_depthwise_conv2d_ws",
+        depthwise_weight_sums(weight, bias, input_offset),
+        weight_sum,
+        weight_sum_format,
+    )
+    return _stock_dw_conv2d_impl(
+        input, weight, bias, stride, padding, dilation, depth_multiplier, input_offset,
+        output_offset, requantize_multipliers, requantize_shifts, activation_min,
+        activation_max,
+    )

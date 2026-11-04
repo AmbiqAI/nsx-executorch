@@ -202,6 +202,60 @@ inline std::int32_t depthwise_buffer_size(
       output_dims);
 }
 
+// Runs a depthwise layer whose weight sums are already filled in: tries the
+// 3x3 direct entries (same selection as heliaRT's depthwise kernel), then the
+// generic wrapper. `scratch` must hold depthwise_scratch_size() bytes;
+// `weight_sum` is read only, so it may point at precomputed constants (see
+// arm_convolve_weight_sum() reuse rules) and may be empty on non-MVE builds.
+inline arm_cmsis_nn_status depthwise_with_weight_sum(
+    const cmsis_nn_context* scratch,
+    const cmsis_nn_context* weight_sum,
+    const cmsis_nn_dw_conv_params* conv_params,
+    const cmsis_nn_per_channel_quant_params* quant_params,
+    const cmsis_nn_dims* input_dims,
+    const std::int8_t* input_data,
+    const cmsis_nn_dims* filter_dims,
+    const std::int8_t* filter_data,
+    const cmsis_nn_dims* bias_dims,
+    const std::int32_t* bias_data,
+    const cmsis_nn_dims* output_dims,
+    std::int8_t* output_data) {
+#if NSX_EXECUTORCH_DW_S8_OPT_3X3
+  // The direct entries read the bias through the weight sums, so they need
+  // them.
+  if (weight_sum->size > 0 &&
+      depthwise_s8_opt_3x3_candidate(
+          conv_params, input_dims, filter_dims, output_dims)) {
+    const bool c64_s1 = input_dims->c == 64 && conv_params->stride.h == 1;
+    const arm_cmsis_nn_status opt_status =
+        c64_s1 ? ::arm_depthwise_conv_s8_opt_3x3_c64_s1(
+                     scratch, weight_sum, conv_params, quant_params,
+                     input_dims, input_data, filter_dims, filter_data,
+                     bias_dims, bias_data, output_dims, output_data)
+               : ::arm_depthwise_conv_s8_opt_3x3(
+                     scratch, weight_sum, conv_params, quant_params,
+                     input_dims, input_data, filter_dims, filter_data,
+                     bias_dims, bias_data, output_dims, output_data);
+    if (opt_status != ARM_CMSIS_NN_NO_IMPL_ERROR) {
+      return opt_status;
+    }
+  }
+#endif
+  return ::arm_depthwise_conv_wrapper_s8(
+      scratch,
+      weight_sum,
+      conv_params,
+      quant_params,
+      input_dims,
+      input_data,
+      filter_dims,
+      filter_data,
+      bias_dims,
+      bias_data,
+      output_dims,
+      output_data);
+}
+
 inline arm_cmsis_nn_status depthwise(
     const cmsis_nn_context* context,
     const cmsis_nn_dw_conv_params* conv_params,
@@ -238,28 +292,7 @@ inline arm_cmsis_nn_status depthwise(
       return weight_status;
     }
   }
-#if NSX_EXECUTORCH_DW_S8_OPT_3X3
-  // The direct entries read the bias through the weight sums, so they need
-  // them; same selection as heliaRT's depthwise kernel.
-  if (weight_sum.size > 0 &&
-      depthwise_s8_opt_3x3_candidate(
-          conv_params, input_dims, filter_dims, output_dims)) {
-    const bool c64_s1 = input_dims->c == 64 && conv_params->stride.h == 1;
-    const arm_cmsis_nn_status opt_status =
-        c64_s1 ? ::arm_depthwise_conv_s8_opt_3x3_c64_s1(
-                     &scratch, &weight_sum, conv_params, quant_params,
-                     input_dims, input_data, filter_dims, filter_data,
-                     bias_dims, bias_data, output_dims, output_data)
-               : ::arm_depthwise_conv_s8_opt_3x3(
-                     &scratch, &weight_sum, conv_params, quant_params,
-                     input_dims, input_data, filter_dims, filter_data,
-                     bias_dims, bias_data, output_dims, output_data);
-    if (opt_status != ARM_CMSIS_NN_NO_IMPL_ERROR) {
-      return opt_status;
-    }
-  }
-#endif
-  return ::arm_depthwise_conv_wrapper_s8(
+  return depthwise_with_weight_sum(
       &scratch,
       &weight_sum,
       conv_params,
@@ -338,6 +371,13 @@ inline arm_cmsis_nn_status transpose(
 
 }  // namespace nsx::executorch::cmsis_nn_compat
 
+// Stock ExecuTorch's Cortex-M operators are force-included with this header
+// and keep calling the stock wrapper names; the macros below redirect them to
+// the adapters above. Code that wants the ns-cmsis-nn API itself (the
+// cortex_m_ns:: kernels, which pass precomputed weight sums) defines
+// NSX_EXECUTORCH_CMSIS_NN_COMPAT_NO_MACROS before including this header and
+// uses only the helpers.
+#ifndef NSX_EXECUTORCH_CMSIS_NN_COMPAT_NO_MACROS
 #define arm_convolve_wrapper_s8_get_buffer_size(...) \
   ::nsx::executorch::cmsis_nn_compat::convolve_buffer_size(__VA_ARGS__)
 #define arm_convolve_wrapper_s8(...) \
@@ -350,3 +390,4 @@ inline arm_cmsis_nn_status transpose(
   ::nsx::executorch::cmsis_nn_compat::transpose_buffer_size(__VA_ARGS__)
 #define arm_transpose_conv_wrapper_s8(...) \
   ::nsx::executorch::cmsis_nn_compat::transpose(__VA_ARGS__)
+#endif  // NSX_EXECUTORCH_CMSIS_NN_COMPAT_NO_MACROS

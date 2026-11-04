@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .weight_sums_ns import WEIGHT_SUM_FORMAT
+
 SCHEMA = "nsx-executorch.pte-manifest/1"
 
 # executorch_flatbuffer ScalarType element sizes for I/O accounting.
@@ -85,6 +87,11 @@ def build_manifest(result: Any, pte_bytes: bytes, kernel_provider: str) -> dict[
         "pte_byte_size": len(pte_bytes),
         "kernel_provider": kernel_provider,
         "requires_ns_ops": bool(by_class["ns"]),
+        # Layout version of the precomputed ns-cmsis-nn weight sums carried
+        # by cortex_m_ns::*_ws operators; None when the PTE has none.
+        "weight_sum_format": (
+            WEIGHT_SUM_FORMAT if any(name.split(".")[0].endswith("_ws") for name in by_class["ns"]) else None
+        ),
         "portable_select_ops_list": ",".join(by_class["portable"]),
         "planned_arena_size": planned,
         "inputs": [_tensor_facts(plan.values[index]) for index in plan.inputs],
