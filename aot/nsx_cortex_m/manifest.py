@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "nsx-executorch.pte-manifest/1"
+# NSX_HELIA_AOT_MAX_MODELS in includes-api/nsx_helia_aot.h, unless the firmware sets
+# NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS.
+HELIA_AOT_DEFAULT_MAX_MODELS = 8
 
 # executorch_flatbuffer ScalarType element sizes for I/O accounting.
 _SCALAR_BYTES = {
@@ -76,6 +79,7 @@ def build_manifest(result: Any, pte_bytes: bytes, kernel_provider: str) -> dict[
     for name in operators:
         by_class[classify_operator(name)].append(name)
 
+    helia_aot_modules = _helia_aot_modules(program, plan)
     buffer_sizes = list(plan.non_const_buffer_sizes)
     planned = int(buffer_sizes[1]) if len(buffer_sizes) == 2 else None
 
@@ -95,7 +99,27 @@ def build_manifest(result: Any, pte_bytes: bytes, kernel_provider: str) -> dict[
             "portable": by_class["portable"],
         },
         "edge_ops": dict(result.edge_ops),
+        # heliaAOT delegate (helia_aot/): the firmware needs NSX_EXECUTORCH_ENABLE_HELIA_AOT=ON and these
+        # generated NSX modules, from the export's helia_aot output_dir.
+        "requires_helia_aot": bool(helia_aot_modules),
+        "helia_aot_modules": helia_aot_modules,
     }
+
+
+def _helia_aot_modules(program: Any, plan: Any) -> list[dict[str, Any]]:
+    from .helia_aot.blob import BACKEND_ID, DelegateBlob
+
+    modules = []
+    for delegate in plan.delegates:
+        if delegate.id != BACKEND_ID:
+            continue
+        blob = DelegateBlob.unpack(bytes(program.backend_delegate_data[delegate.processed.index].data))
+        modules.append({
+            "module": blob.module,
+            "inputs": [{"scalar_type": t.scalar_type, "size_bytes": t.nbytes} for t in blob.inputs],
+            "outputs": [{"scalar_type": t.scalar_type, "size_bytes": t.nbytes} for t in blob.outputs],
+        })
+    return modules
 
 
 def sidecar_path(pte_path: Path | str) -> Path:
@@ -151,4 +175,16 @@ def lowering_report(manifest: dict[str, Any]) -> str:
         )
     if not ops["portable"]:
         lines.append("no portable fallbacks: every operator runs on int8 CMSIS-NN kernels")
+    modules = manifest.get("helia_aot_modules") or []
+    if modules:
+        lines.append(
+            f"heliaAOT delegate: {len(modules)} module(s); the firmware needs "
+            "NSX_EXECUTORCH_ENABLE_HELIA_AOT=ON and must link each one:"
+        )
+        lines += [f"  [heliaAOT   ] {module['module']}" for module in modules]
+        if len(modules) > HELIA_AOT_DEFAULT_MAX_MODELS:
+            lines.append(
+                f"  more than the registry's default of {HELIA_AOT_DEFAULT_MAX_MODELS}: build with "
+                f"NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS={len(modules)} or more"
+            )
     return "\n".join(lines)
