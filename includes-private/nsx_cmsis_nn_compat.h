@@ -6,8 +6,24 @@
 #error "nsx-executorch requires an NSX-capable ns-cmsis-nn release (>= 7.2.0)"
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+
+// Route s8 3x3 depthwise layers to ns-cmsis-nn's direct entries
+// (arm_depthwise_conv_s8_opt_3x3[_c64_s1], added in 7.37.0) before the
+// generic wrapper, as heliaRT does. The entries only exist on MVEI builds and
+// return ARM_CMSIS_NN_NO_IMPL_ERROR without writing output for any layer
+// outside their gate, so the wrapper stays the fallback. Build with
+// -DNSX_EXECUTORCH_DW_S8_OPT_3X3=0 to force the wrapper (A/B comparisons).
+#ifndef NSX_EXECUTORCH_DW_S8_OPT_3X3
+#if NS_CMSIS_NN_VERSION >= 7037000 && defined(ARM_MATH_MVEI) && \
+    !defined(ARM_MATH_AUTOVECTORIZE)
+#define NSX_EXECUTORCH_DW_S8_OPT_3X3 1
+#else
+#define NSX_EXECUTORCH_DW_S8_OPT_3X3 0
+#endif
+#endif
 
 namespace nsx::executorch::cmsis_nn_compat {
 
@@ -132,14 +148,57 @@ inline arm_cmsis_nn_status convolve(
       output_data);
 }
 
+// True when a layer may take a 3x3 direct entry. This is only the coarse
+// shape check that decides whether the scratch must also fit the entries;
+// the entries apply their full gate themselves and decline with
+// ARM_CMSIS_NN_NO_IMPL_ERROR.
+inline bool depthwise_s8_opt_3x3_candidate(
+    const cmsis_nn_dw_conv_params* conv_params,
+    const cmsis_nn_dims* input_dims,
+    const cmsis_nn_dims* filter_dims,
+    const cmsis_nn_dims* output_dims) {
+#if NSX_EXECUTORCH_DW_S8_OPT_3X3
+  return filter_dims->h == 3 && filter_dims->w == 3 &&
+         conv_params->ch_mult == 1 && input_dims->c == output_dims->c;
+#else
+  (void)conv_params;
+  (void)input_dims;
+  (void)filter_dims;
+  (void)output_dims;
+  return false;
+#endif
+}
+
+// Scratch for the depthwise call: the wrapper's, raised to the 3x3 entries'
+// size for candidate layers so one buffer serves either route.
+inline std::int32_t depthwise_scratch_size(
+    const cmsis_nn_dw_conv_params* conv_params,
+    const cmsis_nn_dims* input_dims,
+    const cmsis_nn_dims* filter_dims,
+    const cmsis_nn_dims* output_dims) {
+  std::int32_t size = ::arm_depthwise_conv_wrapper_s8_get_buffer_size(
+      conv_params, input_dims, filter_dims, output_dims);
+#if NSX_EXECUTORCH_DW_S8_OPT_3X3
+  if (size >= 0 && depthwise_s8_opt_3x3_candidate(
+                       conv_params, input_dims, filter_dims, output_dims)) {
+    const std::int32_t opt_3x3_size =
+        ::arm_depthwise_conv_s8_opt_3x3_get_buffer_size(input_dims);
+    if (opt_3x3_size < 0) {
+      return -1;
+    }
+    size = std::max(size, opt_3x3_size);
+  }
+#endif
+  return size;
+}
+
 inline std::int32_t depthwise_buffer_size(
     const cmsis_nn_dw_conv_params* conv_params,
     const cmsis_nn_dims* input_dims,
     const cmsis_nn_dims* filter_dims,
     const cmsis_nn_dims* output_dims) {
   return combined_size(
-      ::arm_depthwise_conv_wrapper_s8_get_buffer_size(
-          conv_params, input_dims, filter_dims, output_dims),
+      depthwise_scratch_size(conv_params, input_dims, filter_dims, output_dims),
       output_dims);
 }
 
@@ -155,9 +214,8 @@ inline arm_cmsis_nn_status depthwise(
     const std::int32_t* bias_data,
     const cmsis_nn_dims* output_dims,
     std::int8_t* output_data) {
-  const std::int32_t scratch_size =
-      ::arm_depthwise_conv_wrapper_s8_get_buffer_size(
-          conv_params, input_dims, filter_dims, output_dims);
+  const std::int32_t scratch_size = depthwise_scratch_size(
+      conv_params, input_dims, filter_dims, output_dims);
   cmsis_nn_context scratch{};
   cmsis_nn_context weight_sum{};
   if (!split_context(
@@ -180,6 +238,27 @@ inline arm_cmsis_nn_status depthwise(
       return weight_status;
     }
   }
+#if NSX_EXECUTORCH_DW_S8_OPT_3X3
+  // The direct entries read the bias through the weight sums, so they need
+  // them; same selection as heliaRT's depthwise kernel.
+  if (weight_sum.size > 0 &&
+      depthwise_s8_opt_3x3_candidate(
+          conv_params, input_dims, filter_dims, output_dims)) {
+    const bool c64_s1 = input_dims->c == 64 && conv_params->stride.h == 1;
+    const arm_cmsis_nn_status opt_status =
+        c64_s1 ? ::arm_depthwise_conv_s8_opt_3x3_c64_s1(
+                     &scratch, &weight_sum, conv_params, quant_params,
+                     input_dims, input_data, filter_dims, filter_data,
+                     bias_dims, bias_data, output_dims, output_data)
+               : ::arm_depthwise_conv_s8_opt_3x3(
+                     &scratch, &weight_sum, conv_params, quant_params,
+                     input_dims, input_data, filter_dims, filter_data,
+                     bias_dims, bias_data, output_dims, output_data);
+    if (opt_status != ARM_CMSIS_NN_NO_IMPL_ERROR) {
+      return opt_status;
+    }
+  }
+#endif
   return ::arm_depthwise_conv_wrapper_s8(
       &scratch,
       &weight_sum,
