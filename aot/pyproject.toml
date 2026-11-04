@@ -23,6 +23,10 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+# ExecuTorch delegate that compiles supported subgraphs with heliaAOT (nsx_cortex_m.helia_aot).
+helia-aot = ["helia-aot>=1.4,<2"]
+
 [project.scripts]
 helia-torch = "nsx_cortex_m.cli:main"
 

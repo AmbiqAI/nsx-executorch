@@ -34,6 +34,8 @@ set(NSX_EXECUTORCH_ENABLE_PROFILING OFF CACHE BOOL
     "Enable EventTracer-backed per-operator callbacks")
 set(NSX_EXECUTORCH_ENABLE_NS_OPS OFF CACHE BOOL
     "Build and register the cortex_m_ns:: operators backed by ns-cmsis-nn additional kernels (requires provider=ns)")
+set(NSX_EXECUTORCH_ENABLE_HELIA_AOT OFF CACHE BOOL
+    "Build the HeliaAotBackend delegate that runs helia-torch partitions compiled by heliaAOT (requires provider=ns)")
 set(NSX_EXECUTORCH_OPTIMIZATION "speed" CACHE STRING
     "Optimization objective for ExecuTorch code: speed (-O3) or size (-Os)")
 set_property(CACHE NSX_EXECUTORCH_OPTIMIZATION PROPERTY STRINGS speed size)
@@ -55,6 +57,14 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS
     "nsx-executorch: NSX_EXECUTORCH_ENABLE_NS_OPS requires "
     "NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns; the cortex_m_ns:: kernels only "
     "exist in ns-cmsis-nn.")
+endif()
+if(NSX_EXECUTORCH_ENABLE_HELIA_AOT
+   AND NOT NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
+  # heliaAOT modules link ns-cmsis-nn; with the arm provider two CMSIS-NN copies
+  # would define the same arm_* symbols.
+  message(FATAL_ERROR
+    "nsx-executorch: NSX_EXECUTORCH_ENABLE_HELIA_AOT requires "
+    "NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns.")
 endif()
 
 # Resolve a required NSX module's checkout directory the same way the real
@@ -586,6 +596,14 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS)
 endif()
 
 add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
+if(NSX_EXECUTORCH_ENABLE_HELIA_AOT)
+  # HeliaAotBackend + the registry the generated heliaAOT modules register
+  # into (includes-api/nsx_helia_aot.h). run_once() registers the backend.
+  target_sources(nsx_executorch PRIVATE
+    src/helia_aot_backend.cpp
+    src/nsx_helia_aot_registry.c)
+  target_compile_definitions(nsx_executorch PRIVATE NSX_EXECUTORCH_ENABLE_HELIA_AOT)
+endif()
 
 # The pinned Ambiq HAL identifies compilers via __ARMCC_VERSION /
 # __GNUC_STDC_INLINE__ / __IAR_SYSTEMS_ICC__ (am_hal_global.h). clang++
