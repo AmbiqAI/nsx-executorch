@@ -64,6 +64,17 @@ convolution, and transpose-convolution wrappers. A private adapter extends
 ExecuTorch's temporary allocations, precomputes those sums, and passes the
 extra contexts without modifying the pinned ExecuTorch source.
 
+With NS-CMSIS-NN >= 7.37.0 on MVEI builds, the adapter also routes s8 3x3
+depthwise layers to the direct entries `arm_depthwise_conv_s8_opt_3x3_c64_s1`
+(64 channels, stride 1) and `arm_depthwise_conv_s8_opt_3x3`, the same
+selection heliaRT makes, before falling back to the generic wrapper. The
+entries apply their own gate (3x3, `ch_mult` 1, 16-2048 channels, stride 1
+or 2, padding 0 or 1, ...) and decline other layers without writing output, so the
+wrapper handles everything else. Output is identical to the wrapper; scratch
+for 3x3 candidates grows to the entries' size (3008 + input W x C + 16 bytes).
+Older providers, the `arm` provider and non-MVE builds are unchanged. Define
+`NSX_EXECUTORCH_DW_S8_OPT_3X3=0` to force the wrapper for A/B comparisons.
+
 Enable layer callbacks with:
 
 ```cmake
