@@ -556,6 +556,7 @@ class _Builder:
             val = node.meta["val"]
             tid = self._tensor(kind=AirTensorKind.SCRATCH, shape=physical_shape(val), dtype=np.int8,
                                scale=float(scale), zp=int(zp), name=src.name)
+            self.tensor_order[tid] = dim_order(val)
             self.node_tensor[node.name] = tid
             self.node_tensor[src.name] = tid
             return

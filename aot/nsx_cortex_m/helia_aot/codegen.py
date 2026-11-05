@@ -162,40 +162,63 @@ def _air_fingerprint(air_model):
     return tensors, ops, tuple(air_model.input_ids), tuple(air_model.output_ids)
 
 
-def generate_module(air_model, options: HeliaAotOptions, name: str) -> Path:
-    """Run heliaAOT on `air_model` and write an NSX module `<output_dir>/<name>` wired for the delegate."""
-    from helia_aot import AotConverter, ConvertArgs
+def apply_semantic_rules(cfg, air_model) -> None:
+    """Prepend SEMANTIC_OPERATOR_RULES for the operators `air_model` uses to heliaAOT ConvertArgs `cfg`."""
+    from helia_aot.cli.defines import OperatorRuleset
+
+    present = {str(getattr(op.op_type, "name", op.op_type)) for op in air_model.operators}
+    rules = [r for r in SEMANTIC_OPERATOR_RULES if r["type"] in present]
+    cfg.operators = [OperatorRuleset(**rule) for rule in rules] + list(cfg.operators or [])
+
+
+def convert_air(air_model, cfg):
+    """Run heliaAOT on `air_model` with ConvertArgs `cfg` (module, platform, memory, ...) and return its
+    ConversionResult.
+
+    heliaAOT has no AIR file format -- its only loader is LiteRT -- so the model is handed to its Load stage
+    in-process; cfg.model.path is replaced by a placeholder file for the duration. The semantic operator
+    rules (bit-exactness with ExecuTorch's kernels) are applied first.
+    """
+    from helia_aot import AotConverter
+
+    apply_semantic_rules(cfg, air_model)
+    with tempfile.TemporaryDirectory(prefix="helia-torch-air-") as tmp:
+        token = Path(tmp) / f"{air_model.name or 'model'}.air"
+        token.write_bytes(b"")  # heliaAOT only needs a path; the frontend swap supplies the model
+        cfg.model.path = token
+        with _air_frontend(air_model, token):
+            return AotConverter(config=cfg).convert()
+
+
+def generate_module(air_model, options: HeliaAotOptions, name: str, *, executorch_registration: bool = True) -> Path:
+    """Run heliaAOT on `air_model` and write the NSX module `<output_dir>/<name>`.
+
+    With executorch_registration (the delegate), the module also registers itself with nsx-executorch's
+    HeliaAotBackend; without it (compile_model), it is a plain heliaAOT module.
+    """
+    from helia_aot import ConvertArgs
     from helia_aot.defines import ModuleType
 
     out_dir = Path(options.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     air_model.name = name
-    with tempfile.TemporaryDirectory(prefix="helia-torch-air-") as tmp:
-        token = Path(tmp) / f"{name}.air"
-        token.write_bytes(b"")  # heliaAOT only needs a path; the frontend swap supplies the model
-        args = dict(options.extra)
-        cfg = ConvertArgs(**args) if args else ConvertArgs()
-        cfg.model.path = token
-        cfg.model.name = name
-        cfg.module.path = out_dir
-        cfg.module.name = name
-        cfg.module.prefix = name
-        cfg.module.type = ModuleType.NSX
-        cfg.platform.name = options.platform
-        if options.capabilities is not None:
-            from helia_aot.platforms.defines import SocCapability
+    args = dict(options.extra)
+    cfg = ConvertArgs(**args) if args else ConvertArgs()
+    cfg.model.name = name
+    cfg.module.path = out_dir
+    cfg.module.name = name
+    cfg.module.prefix = name
+    cfg.module.type = ModuleType.NSX
+    cfg.platform.name = options.platform
+    if options.capabilities is not None:
+        from helia_aot.platforms.defines import SocCapability
 
-            cfg.platform.capabilities = [SocCapability(c) for c in options.capabilities]
-        from helia_aot.cli.defines import OperatorRuleset
-
-        present = {str(getattr(op.op_type, "name", op.op_type)) for op in air_model.operators}
-        rules = [r for r in SEMANTIC_OPERATOR_RULES if r["type"] in present]
-        cfg.operators = [OperatorRuleset(**rule) for rule in rules] + list(cfg.operators or [])
-        cfg.force = True
-        with _air_frontend(air_model, token):
-            AotConverter(config=cfg).convert()
+        cfg.platform.capabilities = [SocCapability(c) for c in options.capabilities]
+    cfg.force = True
+    convert_air(air_model, cfg)
     module_dir = out_dir / name
-    _write_registration(module_dir, name, len(air_model.input_ids), len(air_model.output_ids))
+    if executorch_registration:
+        _write_registration(module_dir, name, len(air_model.input_ids), len(air_model.output_ids))
     return module_dir
 
 
