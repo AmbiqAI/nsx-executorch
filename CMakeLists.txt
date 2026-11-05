@@ -37,9 +37,9 @@ set(NSX_EXECUTORCH_ENABLE_NS_OPS OFF CACHE BOOL
 set(NSX_EXECUTORCH_ENABLE_HELIA_AOT OFF CACHE BOOL
     "Build the HeliaAotBackend delegate that runs helia-torch partitions compiled by heliaAOT (requires provider=ns)")
 set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST "" CACHE STRING
-    "Comma-separated cortex_m:: operators to register (e.g. a .pte.json sidecar's operators.cortex_m); empty registers all")
+    "Comma-separated cortex_m:: operators to register (e.g. a .pte.json sidecar's operators.cortex_m); empty registers all, NONE registers none")
 set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "" CACHE STRING
-    "Comma-separated cortex_m_ns:: operators to register (sidecar operators.cortex_m_ns); empty registers all. Needs NSX_EXECUTORCH_ENABLE_NS_OPS")
+    "Comma-separated cortex_m_ns:: operators to register (sidecar operators.cortex_m_ns); empty registers all, NONE registers none. Needs NSX_EXECUTORCH_ENABLE_NS_OPS")
 set(NSX_EXECUTORCH_OPTIMIZATION "speed" CACHE STRING
     "Optimization objective for ExecuTorch code: speed (-O3) or size (-Os)")
 set_property(CACHE NSX_EXECUTORCH_OPTIMIZATION PROPERTY STRINGS speed size)
@@ -70,7 +70,18 @@ if(NSX_EXECUTORCH_ENABLE_HELIA_AOT
     "nsx-executorch: NSX_EXECUTORCH_ENABLE_HELIA_AOT requires "
     "NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns.")
 endif()
-if(NSX_EXECUTORCH_NS_SELECT_OPS_LIST AND NOT NSX_EXECUTORCH_ENABLE_NS_OPS)
+# NONE selects no operators of that namespace: its registration library is not
+# built or linked at all (e.g. a PTE that is only a delegate call).
+set(_nsx_executorch_cortex_m_none OFF)
+if(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST STREQUAL "NONE")
+  set(_nsx_executorch_cortex_m_none ON)
+endif()
+set(_nsx_executorch_build_ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}")
+if(NSX_EXECUTORCH_NS_SELECT_OPS_LIST STREQUAL "NONE")
+  set(_nsx_executorch_build_ns_ops OFF)
+endif()
+if(NSX_EXECUTORCH_NS_SELECT_OPS_LIST AND NOT NSX_EXECUTORCH_NS_SELECT_OPS_LIST STREQUAL "NONE"
+   AND NOT NSX_EXECUTORCH_ENABLE_NS_OPS)
   message(FATAL_ERROR
     "nsx-executorch: NSX_EXECUTORCH_NS_SELECT_OPS_LIST selects cortex_m_ns:: "
     "operators, which are only built with NSX_EXECUTORCH_ENABLE_NS_OPS=ON.")
@@ -355,20 +366,24 @@ endif()
 # 16: backends/cortex_m/ops/operators.yaml; 7: ops-ns/operators_ns.yaml) —
 # recount on an ExecuTorch upgrade.
 set(_nsx_executorch_cortex_m_ops_count 16)
-if(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
+if(_nsx_executorch_cortex_m_none)
+  set(_nsx_executorch_cortex_m_ops_count 0)
+elseif(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
   _nsx_executorch_select_ops(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
     "${NSX_EXECUTORCH_SOURCE_ROOT}/backends/cortex_m/ops/operators.yaml"
     _nsx_executorch_cortex_m_root_ops _nsx_executorch_cortex_m_ops_count)
 endif()
 set(_nsx_executorch_ns_ops_count 7)
-if(NSX_EXECUTORCH_NS_SELECT_OPS_LIST)
+if(NOT _nsx_executorch_build_ns_ops)
+  set(_nsx_executorch_ns_ops_count 0)
+elseif(NSX_EXECUTORCH_NS_SELECT_OPS_LIST)
   _nsx_executorch_select_ops(NSX_EXECUTORCH_NS_SELECT_OPS_LIST
     "${NSX_EXECUTORCH_ROOT}/ops-ns/operators_ns.yaml"
     _nsx_executorch_ns_root_ops _nsx_executorch_ns_ops_count)
 endif()
 math(EXPR _nsx_executorch_registered_kernels
      "25 + ${_nsx_executorch_cortex_m_ops_count}")
-if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+if(_nsx_executorch_build_ns_ops)
   math(EXPR _nsx_executorch_registered_kernels
        "${_nsx_executorch_registered_kernels} + ${_nsx_executorch_ns_ops_count}")
 endif()
@@ -586,7 +601,7 @@ if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "arm"
   endif()
 endif()
 
-if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+if(_nsx_executorch_build_ns_ops)
   # Ambiq ns-cmsis-nn additional kernels: build the out-of-tree cortex_m_ns::
   # operator library using stock ExecuTorch codegen (public extension point;
   # the pinned submodule stays untouched). PTEs containing cortex_m_ns:: ops
@@ -672,8 +687,10 @@ endif()
 # operators over the same stock cortex_m_kernels (public codegen extension
 # point; the pinned tree is untouched) and link it instead. Unregistered
 # kernels are then never referenced and stay out of the image.
-set(_nsx_executorch_cortex_m_ops_lib cortex_m_ops_lib)
-if(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
+set(_nsx_executorch_cortex_m_ops_lib cortex_m_ops_lib cortex_m_kernels)
+if(_nsx_executorch_cortex_m_none)
+  set(_nsx_executorch_cortex_m_ops_lib "")
+elseif(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
   set(EXECUTORCH_ROOT "${NSX_EXECUTORCH_SOURCE_ROOT}")
   if(NOT COMMAND gen_selected_ops)
     include("${NSX_EXECUTORCH_SOURCE_ROOT}/tools/cmake/Codegen.cmake")
@@ -701,7 +718,7 @@ if(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
     target_compile_definitions(nsx_cortex_m_ops_lib PRIVATE
       ET_EVENT_TRACER_ENABLED)
   endif()
-  set(_nsx_executorch_cortex_m_ops_lib nsx_cortex_m_ops_lib)
+  set(_nsx_executorch_cortex_m_ops_lib nsx_cortex_m_ops_lib cortex_m_kernels)
 endif()
 
 add_library(nsx_executorch STATIC src/nsx_executorch.cpp)
@@ -770,11 +787,10 @@ target_link_libraries(nsx_executorch PRIVATE
   executorch
   extension_data_loader
   ${_nsx_executorch_cortex_m_ops_lib}
-  cortex_m_kernels
   # Generated program schema: the adapter reads operator and delegate names
   # out of the plan for OperatorEvent (an include-only INTERFACE target).
   program_schema)
-if(NSX_EXECUTORCH_ENABLE_NS_OPS)
+if(_nsx_executorch_build_ns_ops)
   target_link_libraries(nsx_executorch PRIVATE
     cortex_m_ns_ops_lib
     cortex_m_ns_kernels)

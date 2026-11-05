@@ -206,6 +206,28 @@ jobs:
             echo "::error::misspelled select-ops entry was accepted"
             exit 1
           fi
+          # NONE: no registration library for either namespace is linked into nsx_executorch.
+          cmake -S tests/real-provider -B build/real-ns-select-none -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
+            -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST=NONE \
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=NONE
+          (cd build/real-ns-select-none && cmake --graphviz=deps.dot . > /dev/null)
+          python3 - build/real-ns-select-none/deps.dot <<'PY'
+          import re, sys
+          dot = open(sys.argv[1]).read()
+          labels = dict(re.findall(r'"(node\d+)" \[ label = "([^"]+)"', dot))
+          adapter = {n for n, label in labels.items() if label.startswith("nsx_executorch\\n")}
+          linked = {labels[b] for a, b in re.findall(r'"(node\d+)" -> "(node\d+)"', dot) if a in adapter}
+          bad = sorted(t for t in linked if t.endswith("ops_lib") or t in ("cortex_m_kernels", "cortex_m_ns_kernels"))
+          if not adapter or bad:
+              sys.exit(f"::error::NONE still links {bad or 'no nsx_executorch target'}")
+          PY
 
   atfe-cross-build:
     runs-on: ubuntu-24.04

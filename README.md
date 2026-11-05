@@ -178,6 +178,10 @@ set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST
     "cortex_m_ns::quantized_conv2d_ws.out" CACHE STRING "" FORCE)
 ```
 
+`NONE` registers no operators of that namespace and links no registration
+library for it, for example when a PTE is only a heliaAOT delegate call. An
+empty value still registers all.
+
 With a list, the module generates its own registration library for exactly
 those operators over the stock `cortex_m_kernels` (the pinned tree is
 untouched) and links it instead of stock `cortex_m_ops_lib`; unregistered
