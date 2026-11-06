@@ -520,3 +520,75 @@ def quantized_depthwise_conv2d_ws_impl(
         output_offset, requantize_multipliers, requantize_shifts, activation_min,
         activation_max,
     )
+
+
+# ===================================================================
+# quantized_layer_norm (arm_layer_norm_s8 / arm_layer_norm_s16)
+# ===================================================================
+#
+# Layer norm over the last dimension of an int8 or int16 tensor, with the affine parameters and the quantization
+# folded at export time (layer_norm_ns.export_params): gamma and bias are int32 [N] constants, epsilon is the
+# integer epsilon term and output_shift the shared output exponent. The reference implementation is the kernel's
+# exact integer algorithm (layer_norm_ns.layer_norm_int).
+
+ns_lib.define(
+    "quantized_layer_norm("
+    "Tensor self, Tensor gamma, Tensor bias, int epsilon, int output_shift, "
+    "int activation_min, int activation_max) -> Tensor"
+)
+ns_lib.define(
+    "quantized_layer_norm.out("
+    "Tensor self, Tensor gamma, Tensor bias, int epsilon, int output_shift, "
+    "int activation_min, int activation_max, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+@register_fake("cortex_m_ns::quantized_layer_norm")
+def quantized_layer_norm_meta(
+    self: torch.Tensor,
+    gamma: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: int,
+    output_shift: int,
+    activation_min: int,
+    activation_max: int,
+) -> torch.Tensor:
+    return torch.empty_like(self)
+
+
+@impl(ns_lib, "quantized_layer_norm", "CompositeExplicitAutograd")
+def quantized_layer_norm_impl(
+    self: torch.Tensor,
+    gamma: torch.Tensor,
+    bias: torch.Tensor,
+    epsilon: int,
+    output_shift: int,
+    activation_min: int,
+    activation_max: int,
+) -> torch.Tensor:
+    from .layer_norm_ns import layer_norm_int
+
+    return layer_norm_int(self, gamma, bias, epsilon, output_shift, activation_min, activation_max)
+
+
+# ===================================================================
+# layer_norm (arm_layer_norm_f32)
+# ===================================================================
+#
+# Float32 layer norm over the last dimension, for layer norms left in float (the portable aten.native_layer_norm
+# otherwise). Returns only the normalized output, not the mean and rstd.
+
+ns_lib.define("layer_norm(Tensor self, Tensor? weight, Tensor? bias, float eps) -> Tensor")
+ns_lib.define(
+    "layer_norm.out(Tensor self, Tensor? weight, Tensor? bias, float eps, *, Tensor(a!) out) -> Tensor(a!)"
+)
+
+
+@register_fake("cortex_m_ns::layer_norm")
+def layer_norm_meta(self: torch.Tensor, weight, bias, eps: float) -> torch.Tensor:
+    return torch.empty_like(self)
+
+
+@impl(ns_lib, "layer_norm", "CompositeExplicitAutograd")
+def layer_norm_impl(self: torch.Tensor, weight, bias, eps: float) -> torch.Tensor:
+    return torch.nn.functional.layer_norm(self, (self.shape[-1],), weight, bias, eps)

@@ -39,6 +39,7 @@ from torch.export import ExportedProgram
 from .passes_ns import (
     NsActivationRewritePass,
     NsConvWeightSumPass,
+    NsLayerNormPass,
     NsQuantizedOpFusionPass,
     NsStubCapturePass,
 )
@@ -51,6 +52,10 @@ from .passes_ns import (
 #   cortex_m_ns::quantized_hardswish in the fusion pass.
 # - QuantizedOpFusionPass replaced by NsQuantizedOpFusionPass (adds sub,
 #   hardswish, mean and leaky_relu lowerings on top of the stock cases).
+# - NsLayerNormPass inserted before ConvertToCortexMPass: layer norm over the last
+#   dimension lowers to cortex_m_ns::quantized_layer_norm (int8/int16, between
+#   quantized neighbours) or cortex_m_ns::layer_norm (float32), ns-cmsis-nn's
+#   arm_layer_norm kernels, instead of the portable float kernel.
 # - NsConvWeightSumPass appended after ConvertToCortexMPass: conv and
 #   depthwise conv carry their ns-cmsis-nn weight sums as constants
 #   (cortex_m_ns::*_ws) instead of recomputing them on every inference.
@@ -64,6 +69,7 @@ NS_PASS_LIST = [
     NsActivationRewritePass,
     QuantizedClampActivationPass,
     NsQuantizedOpFusionPass,
+    NsLayerNormPass,
     ConvertToCortexMPass,
     NsConvWeightSumPass,
 ]
