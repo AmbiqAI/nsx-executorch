@@ -564,7 +564,9 @@ if(NSX_EXECUTORCH_ENABLE_NS_OPS)
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_hardswish.cpp"
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_mean.cpp"
     "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_relu.cpp"
-    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_leaky_relu.cpp")
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_leaky_relu.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_quantized_layer_norm.cpp"
+    "${NSX_EXECUTORCH_ROOT}/ops-ns/op_layer_norm.cpp")
   target_link_libraries(cortex_m_ns_kernels
     PRIVATE cmsis-nn
     PRIVATE executorch
