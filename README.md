@@ -150,7 +150,24 @@ helia-torch report  model.pte    # kernel lowering report from the sidecar
 helia-torch inspect model.pte    # sidecar manifest as JSON
 ```
 
-`compile` writes `model.pte` plus a `model.pte.json` sidecar (schema
+With the `ns` provider and heliaAOT installed (`pip install 'helia-torch[helia-aot]'`), `compile` uses
+heliaAOT by default. `--helia-aot` picks how:
+
+| `--helia-aot` | Model heliaAOT fully covers | Model with operators heliaAOT does not cover |
+|---|---|---|
+| `auto` (default) | plain heliaAOT module, no PTE | PTE delegating what heliaAOT covers |
+| `module` | plain heliaAOT module, no PTE | error naming each operator heliaAOT refuses |
+| `delegate` | PTE delegating to heliaAOT | PTE delegating what heliaAOT covers |
+| `off` | PTE on the `cortex_m` kernels | PTE on the `cortex_m` kernels |
+
+A plain module (see [compile_model](#whole-model-in-heliaaot-without-executorch-compile_model)) is the
+smallest and fastest build but is firmware code rather than a loadable PTE. `auto` lists the operators that kept
+a model off the module path. Modules go to `--helia-aot-dir` (default: the output's directory, where
+helia-profiler looks for a delegate's modules); `--name` names a plain module and `--platform` picks the
+heliaAOT platform. `auto` falls back to `off` with the `arm` provider, or with a note when heliaAOT is not
+installed; the explicit modes fail instead. `build()` in `nsx_cortex_m.helia_aot` is the Python equivalent.
+
+A PTE build writes `model.pte` plus a `model.pte.json` sidecar (schema
 `nsx-executorch.pte-manifest/1`), SHA-256-bound to that exact PTE. The
 sidecar records everything a target build needs to register the right
 kernels and size its memory: kernel provider, `requires_ns_ops`, the
@@ -381,7 +398,9 @@ compiled.inputs[0].quantize(x)   # float, logical shape -> int8 bytes in the mod
   already-quantized `ExportedProgram`, for example `torch.export.load()` of a saved `quantize()` result.
   `program_to_air()` stops before code generation and returns the AIR plus the boundary.
 - **Fully covered models only.** If any operator would stay in ExecuTorch, `compile_model()` raises
-  `NotFullyDelegableError` naming each node and why; use `export(..., helia_aot=...)` for those models.
+  `NotFullyDelegableError` naming each node and why; use `export(..., helia_aot=...)` for those models, or
+  `build()`, which picks `compile_model()` or the delegate by coverage (`helia-torch compile` does this by
+  default).
 - **The boundary is the application's.** The module takes and returns int8 tensors in their physical (dim
   order) layout, NHWC for channels_last; `IoTensor.quantize()` / `dequantize()` convert.
 - **What it saves.** On an Apollo510 EVB the KWS DS-CNN as a standalone module took 1,622,688 cycles and
