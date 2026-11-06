@@ -472,6 +472,36 @@ class _Builder:
             raise UnsupportedNodeError(f"{node.name}: keepdim=False mean over a non-contiguous tensor")
         self.unary(node, AirOpType.MEAN, AirMeanOptions(axis=axes, keep_dims=bool(keepdim)))
 
+    def layer_norm(self, node):
+        """cortex_m_ns.quantized_layer_norm -> AIR LAYER_NORM from the float definition NsLayerNormPass recorded:
+        heliaAOT folds gamma, beta, eps and the quantization itself, the same way (ns-cmsis-nn's
+        layer_norm_reference.py), so the generated code computes what the ExecuTorch kernel computes."""
+        try:
+            from helia_aot.air import AirLayerNormOptions
+        except ImportError:
+            raise UnsupportedNodeError(f"{node.name}: this heliaAOT has no LAYER_NORM operator") from None
+        info = node.meta.get("ns_layer_norm")
+        if info is None:
+            raise UnsupportedNodeError(f"{node.name}: layer norm without its recorded float parameters")
+        x = node.args[0]
+        val = x.meta["val"]
+        identity = tuple(range(val.dim()))
+        if dim_order(val) != identity:
+            raise UnsupportedNodeError(f"{node.name}: layer norm over a non-contiguous tensor")
+        if x.name in self.node_tensor:
+            in_t = self.node_tensor[x.name]
+        elif x.op == "placeholder" and x.name in self.user_inputs:
+            in_t = self._user_input(x, QParams(*info["input_qparams"]))
+        else:
+            raise UnsupportedNodeError(f"{node.name}: operand {x.name} has no AIR tensor")
+        in_t = self._relayout(in_t, identity, f"{node.name}_contiguous")
+        out_t = self._activation(node, QParams(*info["output_qparams"]), order=identity)
+        named = {}
+        for key in ("gamma", "beta"):
+            if info[key] is not None:
+                named[key] = self._const(info[key].numpy().astype(np.float32), name=f"{node.name}_{key}")
+        self._op(AirOpType.LAYER_NORM, [in_t], [out_t], AirLayerNormOptions(epsilon=float(info["eps"])), named)
+
     def softmax(self, node):
         x, dim = node.args[:2]
         val = x.meta["val"]
@@ -588,6 +618,7 @@ class _Builder:
                                                                     layout_agnostic=True),
             "cortex_m_ns.quantized_mean": self.mean,
             "cortex_m.softmax": self.softmax,
+            "cortex_m_ns.quantized_layer_norm": self.layer_norm,
             "cortex_m.quantized_max_pool2d": lambda n: self.pool(n, True),
             "cortex_m.quantized_avg_pool2d": lambda n: self.pool(n, False),
             "cortex_m.pad": self.pad,

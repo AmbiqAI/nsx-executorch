@@ -597,7 +597,19 @@ class NsLayerNormPass(XNNPACKPass):
                 args=(x_q, gamma_node, bias_node, p.epsilon, p.output_shift, p.activation_min, p.activation_max),
                 kwargs={},
             )
-        ns_node.meta = q.meta
+        ns_node.meta = dict(q.meta)
+        # The quantize node's folded qparams describe its float input; the new node's int8/int16 value is the truth.
+        ns_node.meta.pop("input_qparams", None)
+        ns_node.meta.pop("output_qparams", None)
+        # The float parameters and quantization, for frontends that lower the operator again from its float
+        # definition (the heliaAOT frontend emits AIR LAYER_NORM from them).
+        ns_node.meta["ns_layer_norm"] = {
+            "gamma": None if gamma is None else gamma.detach().to(torch.float32).clone(),
+            "beta": None if beta is None else beta.detach().to(torch.float32).clone(),
+            "eps": eps,
+            "input_qparams": (float(in_scale), int(_in_zp)),
+            "output_qparams": (float(out_scale), int(out_zp)),
+        }
         q.replace_all_uses_with(ns_node)
         for node in (q, out):
             graph_module.graph.erase_node(node)

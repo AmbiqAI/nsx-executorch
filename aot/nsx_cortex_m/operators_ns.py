@@ -543,6 +543,12 @@ ns_lib.define(
 )
 
 
+def _layer_norm_dtype(activation_min: int) -> torch.dtype:
+    """int8 or int16 by the output range: before ConvertToCortexMPass an upstream aten operator can still carry
+    an int32 (accumulator) meta value, so the input's dtype is not reliable there."""
+    return torch.int8 if activation_min >= -128 else torch.int16
+
+
 @register_fake("cortex_m_ns::quantized_layer_norm")
 def quantized_layer_norm_meta(
     self: torch.Tensor,
@@ -553,7 +559,7 @@ def quantized_layer_norm_meta(
     activation_min: int,
     activation_max: int,
 ) -> torch.Tensor:
-    return torch.empty_like(self)
+    return torch.empty_like(self, dtype=_layer_norm_dtype(activation_min))
 
 
 @impl(ns_lib, "quantized_layer_norm", "CompositeExplicitAutograd")

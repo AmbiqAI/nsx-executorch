@@ -83,6 +83,17 @@ class DsCnn(torch.nn.Module):
 
 
 F = torch.nn.functional
+
+
+def _layer_norm(n):
+    ln = torch.nn.LayerNorm(n)
+    with torch.no_grad():
+        ln.weight.normal_(1.0, 0.3)
+        ln.weight[::5] *= -1
+        ln.bias.normal_(0.0, 0.2)
+    return ln
+
+
 CASES = {
     # convolutions and matmuls
     "conv3x3_relu": (Fn(lambda m, x: torch.relu(m["c"](x)), c=torch.nn.Conv2d(8, 16, 3, padding=1)), (_cl(1, 8, 9, 7),)),
@@ -116,9 +127,22 @@ CASES = {
     "pad": (Fn(lambda m, x: F.pad(x, (1, 1, 2, 0))), (_cl(1, 8, 4, 4),)),
     "transpose": (Fn(lambda m, x: x.permute(0, 2, 1)), (torch.randn(1, 6, 10),)),
     "flatten_linear": (Fn(lambda m, x: m["l"](x.flatten(1)), l=torch.nn.Linear(8, 4)), (_cl(1, 8, 1, 1),)),
+    # normalization (needs a heliaAOT with LAYER_NORM)
+    "layer_norm": (Fn(lambda m, x: m["ln"](x), ln=_layer_norm(24)), (torch.randn(1, 6, 24),)),
+    "transformer_mlp": (Fn(lambda m, x: m["down"](torch.relu(m["ln"](m["up"](x)))), up=torch.nn.Linear(16, 32),
+                           ln=_layer_norm(32), down=torch.nn.Linear(32, 16)), (torch.randn(1, 10, 16),)),
     # a whole model
     "kws_ds_cnn": (DsCnn(), (_cl(1, 1, 49, 10),)),
 }
+NEEDS_LAYER_NORM = {"layer_norm", "transformer_mlp"}
+
+
+def _skip_without_layer_norm(name):
+    if name in NEEDS_LAYER_NORM:
+        try:
+            from helia_aot.air import AirLayerNormOptions  # noqa: F401
+        except ImportError:
+            pytest.skip("this heliaAOT has no LAYER_NORM operator")
 
 
 def _quantized(model, inputs, seed=0):
@@ -336,6 +360,7 @@ def _runner_args(in_paths, out_specs) -> list[str]:
 
 @pytest.mark.parametrize("name", list(CASES))
 def test_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
+    _skip_without_layer_norm(name)
     cc, ns_root, ns_lib = ns_cmsis_nn_lib
     model, inputs = CASES[name]
     quantized = _quantized(model, inputs)
@@ -414,6 +439,7 @@ def test_compile_model_rejects_a_bad_name(tmp_path):
 def test_compile_model_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
     """The standalone module computes what the non-delegated ExecuTorch program does, byte for byte -- and so,
     with test_bit_exact_on_host, what the delegate does."""
+    _skip_without_layer_norm(name)
     cc, ns_root, ns_lib = ns_cmsis_nn_lib
     model, inputs = CASES[name]
     quantized = _quantized(model, inputs)

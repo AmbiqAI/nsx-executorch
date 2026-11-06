@@ -302,14 +302,17 @@ result.write_pte("model.pte")
 
 **What gets delegated.** The partitioner runs on the program after the NS passes up to the stock
 `ConvertToCortexMPass`, and asks the AIR frontend (`aot/nsx_cortex_m/helia_aot/frontend.py`) about each node,
-so it claims exactly what converts. That covers all 16 `cortex_m::` and 5 `cortex_m_ns::` operators in int8:
+so it claims exactly what converts. That covers all 16 `cortex_m::` and 5 `cortex_m_ns::` operators in int8, and
+layer norm:
 
 - convolution, depthwise and transposed convolution;
 - linear and bmm;
 - add, sub, mul, maximum and minimum;
 - relu (and relu6 / ±1 / 0..1 bounds), leaky relu, hard swish and softmax;
 - max and average pooling, mean, pad, transpose and reshape;
-- requantization.
+- requantization;
+- layer norm over the last dimension (`cortex_m_ns::quantized_layer_norm`), with a heliaAOT that has the
+  `LAYER_NORM` operator (helia-aot branch `feat/layer-norm`); with an older heliaAOT it stays in ExecuTorch.
 
 Float↔int8 conversions at a partition's edges stay ExecuTorch `cortex_m` kernels, so each delegate exchanges
 int8 tensors. Anything else (for example a float `sigmoid`, which has neither an AIR mapping nor a `cortex_m`
