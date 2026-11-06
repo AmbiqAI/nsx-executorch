@@ -82,7 +82,8 @@ the name and samples PMU counters around every operator.
 The ns provider ships kernels beyond stock CMSIS-NN. This repo can expose a
 first tier of them — `sub`, `hardswish`, `mean`, standalone
 `relu`/`relu6`/`hardtanh`/`clamp`, and `leaky_relu` — to ExecuTorch models as
-quantized int8 operators in a dedicated `cortex_m_ns::` namespace. Everything
+quantized int8 operators in a dedicated `cortex_m_ns::` namespace, and runs layer norm on
+heliaCORE's `arm_layer_norm` kernels (below). Everything
 composes stock ExecuTorch through public extension points (`ops-ns/` operator
 YAML + codegen, `aot/nsx_cortex_m/` Python package); the pinned submodule is
 never modified.
@@ -197,6 +198,30 @@ Tier 1 restrictions (documented qualifiers; anything else falls back):
 
 Follow-up tiers (later PRs): sigmoid/tanh int16, data-movement ops, further
 reductions, LSTM/SVDF.
+
+### Layer norm (`quantized_layer_norm`, `layer_norm`)
+
+`NsLayerNormPass` lowers `torch.nn.LayerNorm` / `F.layer_norm` over the last dimension to ns-cmsis-nn's
+`arm_layer_norm_s8` / `_s16` / `_f32` (ns-cmsis-nn branch `feat/layer-norm`). The stock flow runs a layer norm in
+float, between dequantize and quantize, on the portable `aten.native_layer_norm` kernel.
+
+- **Quantized.** Between quantized neighbours the layer norm becomes `cortex_m_ns::quantized_layer_norm` on the
+  int8 (or int16) tensor. gamma and beta are folded with the input and output quantization into int32 constants at
+  export (`aot/nsx_cortex_m/layer_norm_ns.py`). The kernel is exact against float layer norm for int8 outputs, so
+  the numerics are the stock flow's.
+- **Float.** A layer norm left in float becomes `cortex_m_ns::layer_norm`. It uses `arm_layer_norm_f32` when
+  ns-cmsis-nn is built with `ARM_NN_ENABLE_F32`, and an equivalent C loop otherwise.
+- **Not lowered:** a layer norm over more than the last dimension, over a non-contiguous (e.g. channels-last)
+  tensor, or whose mean/rstd outputs are used, stays as it was.
+- **Runtime.** `quantized_layer_norm` needs an ns-cmsis-nn with the layer-norm kernels; against an older one it
+  builds but fails at runtime with `NotSupported`.
+
+The integer algorithm is ns-cmsis-nn's (`Tests/UnitTest/layer_norm_reference.py`); `aot/tests/test_layer_norm.py`
+checks the export parameters and the reference operator against it and against the C kernel itself.
+
+On an Apollo510 EVB, a transformer-style block (49 tokens, Linear 64→128, LayerNorm, ReLU, Linear 128→64,
+LayerNorm) through the ExecuTorch runtime took 420,871 cycles, against 679,020 with the stock lowering, and its
+output matched the host bit for bit (8/8 vectors). The kernel alone runs at about 5–8 cycles per element.
 
 ## heliaAOT delegate (`HeliaAotBackend`)
 

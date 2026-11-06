@@ -39,3 +39,18 @@
   kernels:
     - arg_meta: null
       kernel_name: cortex_m_ns::quantized_leaky_relu_out
+
+# Layer norm over the last dimension (ns-cmsis-nn arm_layer_norm_s8 / _s16): int8 or int16 input and output, with
+# gamma / bias / epsilon / output_shift folded at export (aot/nsx_cortex_m/layer_norm_ns.py).
+- func: cortex_m_ns::quantized_layer_norm.out(Tensor self, Tensor gamma, Tensor bias, int epsilon, int output_shift, int activation_min, int activation_max, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::quantized_layer_norm_out
+
+# Float32 layer norm over the last dimension (ns-cmsis-nn arm_layer_norm_f32, or plain C without float kernels).
+- func: cortex_m_ns::layer_norm.out(Tensor self, Tensor? weight, Tensor? bias, float eps, *, Tensor(a!) out) -> Tensor(a!)
+  variants: function
+  kernels:
+    - arg_meta: null
+      kernel_name: cortex_m_ns::layer_norm_out
