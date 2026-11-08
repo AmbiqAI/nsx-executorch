@@ -193,6 +193,39 @@ nsx_executorch_link_helia_aot_modules(app
 
 helia-profiler reads the sidecar itself and does not need these functions.
 
+### Selective operator registration
+
+ExecuTorch registers kernels in a static table at init, so every registered
+operator, and the CMSIS-NN kernels it calls, is linked whether or not the
+model uses it. By default this module registers all 16 stock `cortex_m::`
+operators (and all `cortex_m_ns::` operators with
+`NSX_EXECUTORCH_ENABLE_NS_OPS`). For a deployment build, register just what
+the model uses, which the sidecar already lists:
+
+```cmake
+# From <model>.pte.json: operators.cortex_m and operators.cortex_m_ns
+set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
+    "cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out"
+    CACHE STRING "" FORCE)
+set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST
+    "cortex_m_ns::quantized_mean.out" CACHE STRING "" FORCE)
+```
+
+With a list, the module generates its own registration library for exactly
+those operators over the stock `cortex_m_kernels` (the pinned tree is
+untouched) and links it instead of stock `cortex_m_ops_lib`; unregistered
+kernels are never referenced and stay out of the image. Names are checked
+against the operator schemas at configure time. As with
+`NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST`, a PTE that needs an operator
+outside the list fails at `Method::load` with a missing-operator error, so
+keep the lists empty (register all) for firmware that loads arbitrary models.
+
+Measured on an Apollo510 EVB with an MLPerf Tiny KWS DS-CNN, registering
+only the model's 7 operators: `.text` 224,564 to 188,604 bytes (-35.1 KiB,
+-16%), cycles unchanged. That build also had 3x3 depthwise routing and two
+`cortex_m_ns::` conv operators with export-time weight sums, both since
+removed, so a current build's figure differs somewhat.
+
 Memory *placement* is intentionally not in the sidecar: sizes are export
 facts, but which RAM region each caller-owned arena lives in is a
 board-pressure decision made by the consumer (helia-profiler's
