@@ -165,14 +165,15 @@ nsx_executorch_link_helia_aot_modules(app
     MODULES_DIR build/helia_aot)    # omit when nsx.yml lists the modules
 ```
 
-- `nsx_executorch_configure_from_sidecars()` sets
-  `NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST` to the union of the models'
-  portable fallbacks, switches on `NSX_EXECUTORCH_ENABLE_NS_OPS` and
+- `nsx_executorch_configure_from_sidecars()` sets the `cortex_m::`,
+  `cortex_m_ns::` and portable select lists to the union of the operators the
+  models still run in ExecuTorch (`NONE` for a namespace none of them uses;
+  see "Selective operator registration"), switches on `NSX_EXECUTORCH_ENABLE_NS_OPS` and
   `NSX_EXECUTORCH_ENABLE_HELIA_AOT` when a model needs them, and records the
   heliaAOT modules the programs call. It sets normal variables, so they take
   precedence over the cache and follow the sidecars on every configure; a
-  portable list given with `-D` is added to the union, and an option already
-  ON stays ON.
+  list given with `-D` is added to the union, and an option already ON stays
+  ON.
 - A model that needs `cortex_m_ns::` operators or heliaAOT needs the ns
   provider: the function selects `NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns` when
   none is set, and fails, naming the sidecar, when another one is. It also
@@ -180,7 +181,10 @@ nsx_executorch_link_helia_aot_modules(app
   modules than the registry holds.
 - Several sidecars configure what all of them need, so firmware can swap
   between a fixed set of models. Calling the function once per model does
-  the same: each call adds to what the earlier ones set.
+  the same: each call adds to what the earlier ones set. Firmware that loads arbitrary models sets
+  `NSX_EXECUTORCH_REGISTER_ALL_OPS=ON` (a cache option, so `-D` works), which
+  registers every `cortex_m::` and, with the ns provider, `cortex_m_ns::`
+  operator again, whatever lists an earlier configure cached.
 - When the PTE sits next to its sidecar, its SHA-256 must match the one the
   sidecar records, so a stale sidecar fails the configure instead of
   `Method::load` on the target. Each sidecar, and its PTE when it is there,
@@ -200,7 +204,9 @@ operator, and the CMSIS-NN kernels it calls, is linked whether or not the
 model uses it. By default this module registers all 16 stock `cortex_m::`
 operators (and all `cortex_m_ns::` operators with
 `NSX_EXECUTORCH_ENABLE_NS_OPS`). For a deployment build, register just what
-the model uses, which the sidecar already lists:
+the model uses, which the sidecar already lists.
+`nsx_executorch_configure_from_sidecars()` sets these lists from the sidecars
+(see "Configuring firmware from sidecars"); to set them by hand:
 
 ```cmake
 # From <model>.pte.json: operators.cortex_m and operators.cortex_m_ns.
@@ -228,10 +234,12 @@ outside the list fails at `Method::load` with a missing-operator error.
 
 For firmware that loads arbitrary or swappable models, leave the lists empty:
 that registers every operator, as without this option. For a fixed set of
-models, join their sidecar lists instead. A list is a CMake cache value, so it
-persists in a build directory; to return to registering everything, configure
-with an empty value (`-DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST=
--DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=`) or use a fresh build directory.
+models, join their sidecar lists instead (the sidecar functions do this; with
+them, `NSX_EXECUTORCH_REGISTER_ALL_OPS=ON` registers everything). A list set by
+hand is a CMake cache value, so it persists in a build directory; to return to
+registering everything, configure with an empty value
+(`-DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST= -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=`)
+or use a fresh build directory.
 
 Measured on an Apollo510 EVB with an MLPerf Tiny KWS DS-CNN, registering
 only the model's 7 operators: `.text` 224,564 to 188,604 bytes (-35.1 KiB,

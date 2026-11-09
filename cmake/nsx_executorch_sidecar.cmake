@@ -17,7 +17,9 @@
 #       MODULES_DIR build/helia_aot)    # omit when nsx.yml lists the modules
 #
 # Several sidecars configure the union of what they need, so firmware can swap
-# between a fixed set of models.
+# between a fixed set of models. Firmware that loads arbitrary models sets
+# NSX_EXECUTORCH_REGISTER_ALL_OPS=ON (for example on the command line), which
+# registers every cortex_m:: and cortex_m_ns:: operator again.
 #
 # Copyright 2026 Ambiq. All Rights Reserved.
 
@@ -26,6 +28,11 @@ include_guard(GLOBAL)
 if(CMAKE_VERSION VERSION_LESS 3.19)
   message(FATAL_ERROR
     "nsx-executorch: reading PTE sidecars needs CMake 3.19 or later (string(JSON)).")
+endif()
+
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+  set(NSX_EXECUTORCH_REGISTER_ALL_OPS OFF CACHE BOOL
+      "With nsx_executorch_configure_from_sidecars(): register every cortex_m:: and cortex_m_ns:: operator, not only the ones the sidecars list (firmware that loads arbitrary models)")
 endif()
 
 # Append the JSON string array at <json> <key...> to the list <out_var>.
@@ -47,13 +54,13 @@ function(_nsx_executorch_sidecar_strings out_var json)
 endfunction()
 
 # Split a comma-separated select list (as passed with -D) into <out_var>,
-# dropping blanks.
+# dropping blanks and the NONE sentinel.
 function(_nsx_executorch_sidecar_split out_var value)
   set(_items "")
   string(REPLACE "," ";" _parts "${value}")
   foreach(_part IN LISTS _parts)
     string(STRIP "${_part}" _part)
-    if(NOT _part STREQUAL "")
+    if(NOT _part STREQUAL "" AND NOT _part STREQUAL "NONE")
       list(APPEND _items "${_part}")
     endif()
   endforeach()
@@ -66,6 +73,8 @@ endfunction()
 # They are normal variables, so they take precedence over the cache entries of
 # the same name and follow the sidecars on every configure:
 #
+#   NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST  union of operators.cortex_m (NONE when empty)
+#   NSX_EXECUTORCH_NS_SELECT_OPS_LIST        union of operators.cortex_m_ns (NONE when empty)
 #   NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST  union of operators.portable
 #   NSX_EXECUTORCH_ENABLE_NS_OPS             ON when a model needs cortex_m_ns:: operators
 #   NSX_EXECUTORCH_ENABLE_HELIA_AOT          ON when a model calls heliaAOT modules
@@ -76,10 +85,14 @@ endfunction()
 #   NSX_EXECUTORCH_CMSIS_NN_PROVIDER         ns, when unset and a model needs
 #                                            cortex_m_ns:: operators or heliaAOT
 #
-# A portable list given in the cache (-D...=a,b) is added to the sidecars'
-# union, so a build can register extra fallbacks. Options are only ever
-# switched on and lists only grow: an option already ON stays ON, and a second
-# call (one per model, say) adds to what the first set.
+# A list given in the cache (-D...=a,b) is added to the sidecars' union, so a
+# build can register extra operators. With NSX_EXECUTORCH_REGISTER_ALL_OPS=ON
+# the cortex_m:: and cortex_m_ns:: lists are emptied (empty registers all),
+# whatever an earlier configure cached, and the cortex_m_ns:: operators are
+# switched on when the provider is ns. Options are only ever switched on and
+# lists only grow: an option already ON stays ON, and a second call (one per
+# model, say) adds to what the first set. NSX_EXECUTORCH_ENABLE_NS_OPS set ON
+# by hand keeps every cortex_m_ns:: operator when no sidecar lists one.
 #
 # A model that needs cortex_m_ns:: operators or heliaAOT needs the ns provider:
 # a provider already set to something else fails here, naming the sidecar.
@@ -105,6 +118,8 @@ function(nsx_executorch_configure_from_sidecars)
   # Set here, not at include: include_guard(GLOBAL) runs the file once, and a
   # variable it set would be missing in every other scope.
   set(_schema_read "nsx-executorch.pte-manifest/1")
+  set(_cortex_m "")
+  set(_ns "")
   set(_portable "")
   set(_modules "${NSX_EXECUTORCH_HELIA_AOT_MODULES}")
   set(_needs_ns_ops OFF)
@@ -144,6 +159,8 @@ function(nsx_executorch_configure_from_sidecars)
       endif()
     endif()
 
+    _nsx_executorch_sidecar_strings(_cortex_m "${_json}" operators cortex_m)
+    _nsx_executorch_sidecar_strings(_ns "${_json}" operators cortex_m_ns)
     _nsx_executorch_sidecar_strings(_portable "${_json}" operators portable)
 
     string(JSON _requires_ns GET "${_json}" requires_ns_ops)
@@ -195,6 +212,7 @@ function(nsx_executorch_configure_from_sidecars)
   if(_needs_ns_provider)
     if(NOT DEFINED NSX_EXECUTORCH_CMSIS_NN_PROVIDER)
       set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER ns PARENT_SCOPE)
+      set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER ns)
     elseif(NOT NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
       message(FATAL_ERROR
         "nsx-executorch: ${_needs_ns_provider} needs cortex_m_ns:: operators or heliaAOT, "
@@ -203,12 +221,59 @@ function(nsx_executorch_configure_from_sidecars)
     endif()
   endif()
 
-  # Extra portable operators given with -D are registered too.
-  _nsx_executorch_sidecar_split(_extra "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}")
-  list(APPEND _portable ${_extra})
-  list(REMOVE_DUPLICATES _portable)
-  list(SORT _portable)
+  # Extra operators given with -D are registered too.
+  foreach(_kind cortex_m ns portable)
+    if(_kind STREQUAL "cortex_m")
+      set(_var NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST)
+    elseif(_kind STREQUAL "ns")
+      set(_var NSX_EXECUTORCH_NS_SELECT_OPS_LIST)
+    else()
+      set(_var NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST)
+    endif()
+    _nsx_executorch_sidecar_split(_extra "${${_var}}")
+    list(APPEND _${_kind} ${_extra})
+    list(REMOVE_DUPLICATES _${_kind})
+    list(SORT _${_kind})
+  endforeach()
   list(REMOVE_DUPLICATES _modules)
+
+  if(_ns)
+    set(_needs_ns_ops ON)
+  endif()
+
+  if(NSX_EXECUTORCH_REGISTER_ALL_OPS)
+    # Empty lists register everything. They are set, not left alone: a list
+    # an earlier configure cached would still select.
+    set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST "" PARENT_SCOPE)
+    set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "" PARENT_SCOPE)
+    if(NSX_EXECUTORCH_CMSIS_NN_PROVIDER STREQUAL "ns")
+      set(_needs_ns_ops ON)
+      message(STATUS "nsx-executorch: registering every cortex_m:: and cortex_m_ns:: "
+                     "operator (NSX_EXECUTORCH_REGISTER_ALL_OPS)")
+    else()
+      message(STATUS "nsx-executorch: registering every cortex_m:: operator "
+                     "(NSX_EXECUTORCH_REGISTER_ALL_OPS; cortex_m_ns:: needs the ns provider)")
+    endif()
+  else()
+    # NONE registers none of a namespace; an empty list would register all.
+    foreach(_kind cortex_m ns)
+      if(_${_kind})
+        string(REPLACE ";" "," _${_kind}_list "${_${_kind}}")
+      else()
+        set(_${_kind}_list NONE)
+      endif()
+    endforeach()
+    set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST "${_cortex_m_list}" PARENT_SCOPE)
+    message(STATUS "nsx-executorch: cortex_m:: operators from sidecars: ${_cortex_m_list}")
+    if(_ns_list STREQUAL "NONE" AND NSX_EXECUTORCH_ENABLE_NS_OPS)
+      # Switched on by hand, and no sidecar says which: NONE would cancel it.
+      message(STATUS "nsx-executorch: NSX_EXECUTORCH_ENABLE_NS_OPS is ON, and no sidecar lists a "
+                     "cortex_m_ns:: operator: its select list is left as it is")
+    else()
+      set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "${_ns_list}" PARENT_SCOPE)
+      message(STATUS "nsx-executorch: cortex_m_ns:: operators from sidecars: ${_ns_list}")
+    endif()
+  endif()
 
   string(REPLACE ";" "," _portable_list "${_portable}")
   set(NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST "${_portable_list}" PARENT_SCOPE)

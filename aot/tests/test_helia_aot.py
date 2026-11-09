@@ -270,8 +270,8 @@ def test_kws_is_fully_delegated(tmp_path):
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake")
 def test_firmware_build_configures_from_the_sidecar(tmp_path):
-    # cmake/nsx_executorch_sidecar.cmake reads the sidecar export writes: the delegate's module is linked and
-    # the backend switched on, with no operator names copied by hand.
+    # cmake/nsx_executorch_sidecar.cmake reads the sidecar export writes: the delegate's module is linked, the
+    # backend switched on and only the remaining operators registered, with no operator names copied by hand.
     model, inputs = CASES["kws_ds_cnn"]
     result = _delegated(_quantized(model, inputs), inputs, tmp_path / "helia_aot")
     pte = tmp_path / "kws.pte"
@@ -284,6 +284,9 @@ def test_firmware_build_configures_from_the_sidecar(tmp_path):
     assert config == {
         "NSX_EXECUTORCH_CMSIS_NN_PROVIDER": "ns",  # the delegate needs it, and none was chosen
         "NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS": "",  # one module fits the registry's default
+        # Only the float<->int8 conversions stay in ExecuTorch.
+        "NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST": "cortex_m::dequantize_per_tensor.out,cortex_m::quantize_per_tensor.out",
+        "NSX_EXECUTORCH_NS_SELECT_OPS_LIST": "NONE",
         "NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST": "",
         "NSX_EXECUTORCH_ENABLE_NS_OPS": "",
         "NSX_EXECUTORCH_ENABLE_HELIA_AOT": "ON",
