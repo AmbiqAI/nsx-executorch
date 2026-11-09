@@ -203,12 +203,15 @@ operators (and all `cortex_m_ns::` operators with
 the model uses, which the sidecar already lists:
 
 ```cmake
-# From <model>.pte.json: operators.cortex_m and operators.cortex_m_ns
-set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
-    "cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out"
-    CACHE STRING "" FORCE)
-set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST
-    "cortex_m_ns::quantized_mean.out" CACHE STRING "" FORCE)
+# From <model>.pte.json: operators.cortex_m and operators.cortex_m_ns.
+# Normal variables, set before nsx-executorch is configured: they follow every
+# edit made here (a cache entry would keep its first value). The option is
+# the app's own, so -DAPP_REGISTER_ALL_OPS=ON still registers everything.
+if(NOT APP_REGISTER_ALL_OPS)
+  set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
+      "cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out")
+  set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "cortex_m_ns::quantized_mean.out")
+endif()
 ```
 
 With a list, the module generates its own registration library for exactly
@@ -217,8 +220,14 @@ untouched) and links it instead of stock `cortex_m_ops_lib`; unregistered
 kernels are never referenced and stay out of the image. Names are checked
 against the operator schemas at configure time. As with
 `NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST`, a PTE that needs an operator
-outside the list fails at `Method::load` with a missing-operator error, so
-keep the lists empty (register all) for firmware that loads arbitrary models.
+outside the list fails at `Method::load` with a missing-operator error.
+
+For firmware that loads arbitrary or swappable models, leave the lists empty:
+that registers every operator, as without this option. For a fixed set of
+models, join their sidecar lists instead. A list is a CMake cache value, so it
+persists in a build directory; to return to registering everything, configure
+with an empty value (`-DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST=
+-DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=`) or use a fresh build directory.
 
 Measured on an Apollo510 EVB with an MLPerf Tiny KWS DS-CNN, registering
 only the model's 7 operators: `.text` 224,564 to 188,604 bytes (-35.1 KiB,
