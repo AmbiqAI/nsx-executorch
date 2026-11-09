@@ -268,6 +268,34 @@ def test_kws_is_fully_delegated(tmp_path):
     assert "target_sources(" in (module / "CMakeLists.txt").read_text()
 
 
+@pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake")
+def test_firmware_build_configures_from_the_sidecar(tmp_path):
+    # cmake/nsx_executorch_sidecar.cmake reads the sidecar export writes: the delegate's module is linked and
+    # the backend switched on, with no operator names copied by hand.
+    model, inputs = CASES["kws_ds_cnn"]
+    result = _delegated(_quantized(model, inputs), inputs, tmp_path / "helia_aot")
+    pte = tmp_path / "kws.pte"
+    result.write_pte(pte)
+    (blob,) = _blobs(result)
+    script = Path(__file__).resolve().parents[2] / "tests" / "sidecar" / "print_config.cmake"
+    run = subprocess.run(["cmake", f"-DSIDECARS={pte}.json", "-P", str(script)],
+                         capture_output=True, text=True, check=True)
+    config = dict(line.split("=", 1) for line in run.stderr.splitlines() if line.startswith("NSX_EXECUTORCH_"))
+    assert config == {
+        "NSX_EXECUTORCH_CMSIS_NN_PROVIDER": "ns",  # the delegate needs it, and none was chosen
+        "NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS": "",  # one module fits the registry's default
+        "NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST": "",
+        "NSX_EXECUTORCH_ENABLE_NS_OPS": "",
+        "NSX_EXECUTORCH_ENABLE_HELIA_AOT": "ON",
+        "NSX_EXECUTORCH_HELIA_AOT_MODULES": blob.module,
+    }
+
+    # A re-exported PTE that the sidecar no longer describes fails the configure.
+    pte.write_bytes(pte.read_bytes() + b"\0")
+    stale = subprocess.run(["cmake", f"-DSIDECARS={pte}.json", "-P", str(script)], capture_output=True, text=True)
+    assert stale.returncode != 0 and "Re-export the model" in " ".join(stale.stderr.split())
+
+
 def test_unsupported_ops_stay_in_executorch(tmp_path):
     # hardtanh(-2, 3) is not an AIR ReLU variant: the convolutions around it are delegated, it is not.
     model = Fn(lambda m, x: m["b"](F.hardtanh(m["a"](x), -2.0, 3.0)),

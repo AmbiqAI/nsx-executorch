@@ -28,6 +28,17 @@ jobs:
       - name: Verify source integrity
         run: python3 tests/verify_source_pins.py
 
+      - name: Configure from PTE sidecars (cmake/nsx_executorch_sidecar.cmake)
+        run: |
+          cmake -DWORK="$GITHUB_WORKSPACE/build/sidecar-test" -P tests/sidecar/test_sidecar.cmake
+          cmake -S tests/sidecar/link -B build/sidecar-link -G Ninja
+          # A heliaAOT module the program calls but the build lacks must fail configure.
+          if cmake -S tests/sidecar/link -B build/sidecar-link-missing -G Ninja \
+              -DNSX_EXECUTORCH_TEST_MISSING=ON; then
+            echo "::error::a missing heliaAOT module was accepted"
+            exit 1
+          fi
+
       - name: Configure arm provider (CMSIS-NN) with profiling
         run: cmake -S tests/smoke -B build/configure-smoke-arm -G Ninja
 
