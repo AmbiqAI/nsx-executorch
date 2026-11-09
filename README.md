@@ -249,7 +249,9 @@ partitioner claims exactly what converts. In int8, that covers:
 - add, sub, mul, maximum and minimum;
 - relu (and relu6 / ±1 / 0..1 bounds), leaky relu, hard swish and softmax;
 - max and average pooling, mean, pad, transpose and reshape;
-- requantization.
+- requantization;
+- layer norm, once heliaAOT's PT2E front end converts it (it needs heliaAOT's `LAYER_NORM` operator, helia-aot
+  branch `feat/layer-norm`); until then it stays in ExecuTorch as `cortex_m_ns::quantized_layer_norm`.
 
 Float↔int8 conversions at a partition's edges stay ExecuTorch `cortex_m` kernels, so each delegate exchanges
 int8 tensors. Anything else (for example a float `sigmoid`, which has neither an AIR mapping nor a `cortex_m`
