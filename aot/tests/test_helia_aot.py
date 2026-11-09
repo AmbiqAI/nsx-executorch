@@ -17,10 +17,12 @@
 # pointing at an ns-cmsis-nn >= 7.47.0 checkout (the bit-exact tests skip
 # otherwise).
 
+import json
 import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -30,14 +32,22 @@ import torch
 pytest.importorskip("helia_aot.converters.pt2e")
 
 from executorch.backends.cortex_m.target_config import CortexM, CortexMTargetConfig  # noqa: E402
+from helia_aot.converters.pt2e.graph import dim_order  # noqa: E402
 
 from nsx_cortex_m.export import export, quantize  # noqa: E402
-from nsx_cortex_m.helia_aot import BACKEND_ID, DelegateBlob, HeliaAotOptions, TensorContract  # noqa: E402
-from helia_aot.converters.pt2e.graph import dim_order  # noqa: E402
+from nsx_cortex_m.helia_aot import (  # noqa: E402
+    BACKEND_ID,
+    DelegateBlob,
+    HeliaAotOptions,
+    NotFullyDelegableError,
+    TensorContract,
+    compile_model,
+)
 from nsx_cortex_m.manifest import build_manifest  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 HOST_MAIN = Path(__file__).resolve().parent / "helia_aot_host" / "host_main.c"
+STANDALONE_MAIN = Path(__file__).resolve().parent / "helia_aot_host" / "standalone_main.c"
 TARGET = CortexMTargetConfig(cpu=CortexM.M55)
 
 
@@ -144,9 +154,13 @@ def _quantized(model, inputs, seed=0):
     return quantize(model.eval(), inputs, kernel_provider="ns", calibration_samples=calibration)
 
 
-def _delegated(quantized, inputs, out_dir: Path, capabilities=("MCU",), platform="apollo4p_evb"):
-    opts = HeliaAotOptions(output_dir=out_dir, platform=platform, capabilities=list(capabilities))
-    return export(quantized, inputs, kernel_provider="ns", target_config=TARGET, helia_aot=opts)
+def _host_options(out_dir: Path) -> HeliaAotOptions:
+    # Plain-C code generation, so the module runs on the host.
+    return HeliaAotOptions(output_dir=out_dir, platform="apollo4p_evb", capabilities=["MCU"])
+
+
+def _delegated(quantized, inputs, out_dir: Path):
+    return export(quantized, inputs, kernel_provider="ns", target_config=TARGET, helia_aot=_host_options(out_dir))
 
 
 def _boundaries(result):
@@ -268,15 +282,21 @@ def test_kws_is_fully_delegated(tmp_path):
     assert "target_sources(" in (module / "CMakeLists.txt").read_text()
 
 
+def _conv_sigmoid_conv():
+    # A float sigmoid between two quantized convolutions: aten.sigmoid has no AIR mapping (nor a cortex_m
+    # kernel), so it runs on the portable float kernel between dequantize and quantize.
+    model = Fn(lambda m, x: m["b"](torch.sigmoid(m["a"](x))), a=torch.nn.Conv2d(4, 8, 1), b=torch.nn.Conv2d(8, 8, 1))
+    return model, (_cl(1, 4, 6, 6),)
+
+
 def test_unsupported_ops_stay_in_executorch(tmp_path):
-    # hardtanh(-2, 3) is not an AIR ReLU variant: the convolutions around it are delegated, it is not.
-    model = Fn(lambda m, x: m["b"](F.hardtanh(m["a"](x), -2.0, 3.0)),
-               a=torch.nn.Conv2d(4, 8, 3, padding=1), b=torch.nn.Conv2d(8, 8, 1))
-    inputs = (_cl(1, 4, 6, 6),)
+    # The convolutions on either side are delegated; the sigmoid and its float conversions are not.
+    model, inputs = _conv_sigmoid_conv()
     result = _delegated(_quantized(model, inputs), inputs, tmp_path)
-    assert len(_blobs(result)) >= 1
+    assert len(_blobs(result)) == 2
     ops = build_manifest(result, result.executorch_program.buffer, "ns")["operators"]
-    assert not any("conv" in op for op in ops["cortex_m"] + ops["cortex_m_ns"])
+    assert any("sigmoid" in op for op in ops["portable"]), ops
+    assert not any("conv" in op for op in ops["cortex_m"] + ops["cortex_m_ns"] + ops["portable"]), ops
 
 
 def test_each_partition_is_named_by_the_saved_program(tmp_path):
@@ -396,17 +416,31 @@ def ns_cmsis_nn_lib(tmp_path_factory):
     return cc, root, lib
 
 
-def _build_host_runner(cc, ns_root, ns_lib, module: Path, name: str, out: Path) -> Path:
+def _module_build_args(ns_root, module: Path, name: str) -> list[str]:
     platform_h = (module / "includes-api" / f"{name}_platform.h").read_text()
     placement = sorted(set(re.findall(r"#ifndef\s+(\w+_PUT_\w+)", platform_h)))
     sources = [str(p) for p in sorted((module / "src").glob("*.c")) if not p.name.endswith("_test_case.c")]
+    return ["-O1", "-std=c11", "-w", "-DARM_NN_ENABLE_F32=1", *(f"-D{p}=" for p in placement),
+            f"-I{module / 'includes-api'}", f"-I{ns_root / 'Include'}", f"-I{ns_root / 'Include' / 'Internal'}",
+            *sources]
+
+
+def _build_host_runner(cc, ns_root, ns_lib, module: Path, name: str, out: Path) -> Path:
+    """The delegate's view of a module: found by name through its registration and the runtime registry."""
     exe = out / f"{name}_host"
     subprocess.run([
-        cc, "-O1", "-std=c11", "-w", "-DARM_NN_ENABLE_F32=1", *(f"-D{p}=" for p in placement),
-        f"-I{module / 'includes-api'}", f"-I{REPO / 'includes-api'}", f"-I{ns_root / 'Include'}",
-        f"-I{ns_root / 'Include' / 'Internal'}", str(HOST_MAIN), str(REPO / "src" / "nsx_helia_aot_registry.c"),
-        str(module / "et" / f"{name}_et_registration.c"), *sources, str(ns_lib), "-lm", "-o", str(exe),
+        cc, *_module_build_args(ns_root, module, name), f"-I{REPO / 'includes-api'}", str(HOST_MAIN),
+        str(REPO / "src" / "nsx_helia_aot_registry.c"), str(module / "et" / f"{name}_et_registration.c"),
+        str(ns_lib), "-lm", "-o", str(exe),
     ], check=True)
+    return exe
+
+
+def _build_standalone_runner(cc, ns_root, ns_lib, module: Path, name: str, out: Path) -> Path:
+    """An application's view of a compile_model() module: <name>_model_init/_run, nothing else."""
+    exe = out / f"{name}_standalone"
+    subprocess.run([cc, *_module_build_args(ns_root, module, name), f"-DHAOT_NAME={name}", str(STANDALONE_MAIN),
+                    str(ns_lib), "-lm", "-o", str(exe)], check=True)
     return exe
 
 
@@ -450,6 +484,60 @@ def _physical_bytes(t: torch.Tensor, order) -> bytes:
     return t.permute(tuple(order)).contiguous().numpy().tobytes()
 
 
+@dataclass(frozen=True)
+class _Boundary:
+    """One int8 boundary tensor: (de)quantization and its physical layout."""
+
+    scale: float
+    zp: int
+    qmin: int
+    qmax: int
+    order: tuple[int, ...]
+
+
+def _run_trials(name, inputs, reference, in_bounds, out_bounds, run, tmp_path, trials=4):
+    """Feed `run` quantized random inputs and compare its int8 outputs with the reference kernels'."""
+    gen = torch.Generator().manual_seed(1234)
+    for trial in range(trials):
+        xs = [(torch.randn(x.shape, generator=gen) * (1 + trial)).to(
+            memory_format=torch.channels_last if x.dim() == 4 and x.is_contiguous(memory_format=torch.channels_last)
+            else torch.contiguous_format) for x in inputs]
+        in_paths, x_qs = [], []
+        for i, (x, b) in enumerate(zip(xs, in_bounds)):
+            x_q = torch.ops.cortex_m.quantize_per_tensor(x, b.scale, b.zp, b.qmin, b.qmax, torch.int8)
+            x_qs.append(x_q)
+            path = tmp_path / f"in{i}.bin"
+            path.write_bytes(_physical_bytes(x_q, b.order))
+            in_paths.append(path)
+        ys = reference.edge_module(*xs)
+        ys = ys if isinstance(ys, (tuple, list)) else (ys,)
+        expected = []
+        for y, b in zip(ys, out_bounds):
+            if name in KERNEL_ORACLES:
+                kernel, stride, pad = KERNEL_ORACLES[name]
+                assert (in_bounds[0].scale, in_bounds[0].zp) == (b.scale, b.zp), "pooling shares its input quantization"
+                y_q = _avg_pool_kernel_oracle(x_qs[0], kernel, stride, pad, in_bounds[0].zp)
+            elif name in MEAN_ORACLES:
+                x_b = in_bounds[0]
+                y_q = _mean_kernel_oracle(x_qs[0], MEAN_ORACLES[name], x_b.scale, x_b.zp, b.scale, b.zp)
+                float_q = torch.clamp(torch.round(y / b.scale) + b.zp, b.qmin, b.qmax)
+                assert (y_q.to(torch.int64) - float_q.to(torch.int64)).abs().max() <= 1
+            else:
+                y_q = torch.clamp(torch.round(y / b.scale) + b.zp, b.qmin, b.qmax).to(torch.int8)
+                assert torch.equal((y_q.float() - b.zp) * b.scale, y), "reference output is not on its int8 grid"
+            expected.append(_physical_bytes(y_q, b.order))
+        out_paths = [tmp_path / f"out{o}.bin" for o in range(len(expected))]
+        run(in_paths, [(p, len(e)) for p, e in zip(out_paths, expected)])
+        for o, (path, exp) in enumerate(zip(out_paths, expected)):
+            got = path.read_bytes()
+            diffs = sum(a != b for a, b in zip(got, exp))
+            assert got == exp, f"{name} trial {trial} output {o}: {diffs}/{len(exp)} bytes differ"
+
+
+def _runner_args(in_paths, out_specs) -> list[str]:
+    return [str(len(in_paths)), *map(str, in_paths), str(len(out_specs)), *(f"{p}:{n}" for p, n in out_specs)]
+
+
 @pytest.mark.parametrize("name", list(CASES))
 def test_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
     cc, ns_root, ns_lib = ns_cmsis_nn_lib
@@ -463,43 +551,109 @@ def test_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
     assert set(ops["cortex_m"]) <= {"cortex_m::quantize_per_tensor.out", "cortex_m::dequantize_per_tensor.out"}
     assert not ops["cortex_m_ns"] and not ops["portable"], ops
     q_nodes, dq_nodes = _boundaries(delegated)
+    in_bounds = [_Boundary(*map(float, q.args[1:2]), *map(int, q.args[2:5]), dim_order(q.meta["val"]))
+                 for q in q_nodes]
+    out_bounds = [_Boundary(*map(float, dq.args[1:2]), *map(int, dq.args[2:5]), dim_order(dq.args[0].meta["val"]))
+                  for dq in dq_nodes]
     exe = _build_host_runner(cc, ns_root, ns_lib, tmp_path / "modules" / blob.module, blob.module, tmp_path)
 
-    gen = torch.Generator().manual_seed(1234)
-    for trial in range(4):
-        xs = [(torch.randn(x.shape, generator=gen) * (1 + trial)).to(
-            memory_format=torch.channels_last if x.dim() == 4 and x.is_contiguous(memory_format=torch.channels_last)
-            else torch.contiguous_format) for x in inputs]
-        args = [str(blob.module), str(len(xs))]
-        for i, (x, q) in enumerate(zip(xs, q_nodes)):
-            _, scale, zp, qmin, qmax, dtype = q.args
-            x_q = torch.ops.cortex_m.quantize_per_tensor(x, scale, zp, qmin, qmax, dtype)
-            path = tmp_path / f"in{i}.bin"
-            path.write_bytes(_physical_bytes(x_q, dim_order(q.meta["val"])))
-            args.append(str(path))
-        ys = reference.edge_module(*xs)
-        ys = ys if isinstance(ys, (tuple, list)) else (ys,)
-        args.append(str(len(dq_nodes)))
-        expected = []
-        for o, (y, dq) in enumerate(zip(ys, dq_nodes)):
-            _, scale, zp, qmin, qmax, _ = dq.args
-            if name in KERNEL_ORACLES:
-                kernel, stride, pad = KERNEL_ORACLES[name]
-                in_zp = q_nodes[0].args[2]
-                assert (q_nodes[0].args[1], in_zp) == (scale, zp), "pooling shares its input quantization"
-                y_q = _avg_pool_kernel_oracle(x_q, kernel, stride, pad, in_zp)
-            elif name in MEAN_ORACLES:
-                in_scale, in_zp = q_nodes[0].args[1:3]
-                y_q = _mean_kernel_oracle(x_q, MEAN_ORACLES[name], in_scale, in_zp, scale, zp)
-                float_q = torch.clamp(torch.round(y / scale) + zp, qmin, qmax)
-                assert (y_q.to(torch.int64) - float_q.to(torch.int64)).abs().max() <= 1
-            else:
-                y_q = torch.clamp(torch.round(y / scale) + zp, qmin, qmax).to(torch.int8)
-                assert torch.equal((y_q.float() - zp) * scale, y), "reference output is not on its int8 grid"
-            expected.append(_physical_bytes(y_q, dim_order(dq.args[0].meta["val"])))
-            args.append(f"{tmp_path / f'out{o}.bin'}:{len(expected[-1])}")
-        subprocess.run([str(exe), *args[0:1], *args[1:]], check=True)
-        for o, exp in enumerate(expected):
-            got = (tmp_path / f"out{o}.bin").read_bytes()
-            diffs = sum(a != b for a, b in zip(got, exp))
-            assert got == exp, f"{name} trial {trial} output {o}: {diffs}/{len(exp)} bytes differ"
+    def run(in_paths, out_specs):
+        subprocess.run([str(exe), blob.module, *_runner_args(in_paths, out_specs)], check=True)
+
+    _run_trials(name, inputs, reference, in_bounds, out_bounds, run, tmp_path)
+
+
+# -- compile_model: the whole model in heliaAOT, no ExecuTorch runtime ------------------------------------------
+
+
+def test_compile_model_writes_a_plain_module(tmp_path):
+    model, inputs = CASES["kws_ds_cnn"]
+    # The quantized program as a user would hand it over: saved and loaded as a .pt2.
+    torch.export.save(_quantized(model, inputs), tmp_path / "kws.pt2")
+    compiled = compile_model(torch.export.load(tmp_path / "kws.pt2"), None, _host_options(tmp_path / "out"),
+                             name="kws")
+    module = tmp_path / "out" / "kws"
+    assert compiled.module_dir == module and (module / "nsx-module.yaml").is_file()
+    assert (module / "includes-api" / "kws_model.h").is_file()
+    # No ExecuTorch registration: a plain heliaAOT module.
+    assert not (module / "et").exists() and "nsx_helia_aot" not in (module / "CMakeLists.txt").read_text()
+    (x,) = compiled.inputs
+    (y,) = compiled.outputs
+    assert (x.shape, x.dim_order, x.physical_shape, x.dtype) == ((1, 1, 49, 10), (0, 2, 3, 1), (1, 49, 10, 1), "int8")
+    assert (y.shape, y.physical_shape, y.nbytes) == ((1, 12), (1, 12), 12)
+    manifest = json.loads((module / "kws_io.json").read_text())
+    assert manifest["module"] == "kws" and manifest["inputs"][0]["scale"] == x.scale
+
+
+def test_io_tensor_quantize_matches_the_boundary_kernel(tmp_path):
+    model, inputs = CASES["conv3x3_relu"]
+    compiled = compile_model(_quantized(model, inputs), None, _host_options(tmp_path))
+    (x_spec,) = compiled.inputs
+    x = inputs[0] * 3
+    kernel = torch.ops.cortex_m.quantize_per_tensor(x, x_spec.scale, x_spec.zero_point, x_spec.qmin, x_spec.qmax,
+                                                    torch.int8)
+    assert torch.equal(x_spec.quantize(x), kernel.permute(x_spec.dim_order).contiguous())
+    # Many values, exact .5 ties among them: dividing by the scale instead of multiplying by its reciprocal
+    # rounds a few of them to another code.
+    per_sample = x[0].numel()
+    ties = (torch.arange(-4 * per_sample, 4 * per_sample, dtype=torch.float32) + 0.5) * x_spec.scale
+    dense = torch.cat([ties, torch.linspace(-4, 4, 400 * per_sample)]).reshape(-1, *x.shape[1:])
+    kernel = torch.ops.cortex_m.quantize_per_tensor(dense, x_spec.scale, x_spec.zero_point, x_spec.qmin,
+                                                    x_spec.qmax, torch.int8)
+    assert torch.equal(x_spec.quantize(dense), kernel.permute(x_spec.dim_order).contiguous())
+    (y_spec,) = compiled.outputs
+    q = torch.randint(-128, 128, y_spec.physical_shape, dtype=torch.int8)
+    inverse = [y_spec.dim_order.index(d) for d in range(4)]
+    assert torch.equal(y_spec.dequantize(q), (q.permute(inverse).float() - y_spec.zero_point) * y_spec.scale)
+
+
+def test_compile_model_refuses_a_partially_supported_model(tmp_path):
+    model, inputs = _conv_sigmoid_conv()
+    with pytest.raises(NotFullyDelegableError) as info:
+        compile_model(_quantized(model, inputs), None, _host_options(tmp_path))
+    assert "aten.sigmoid has no AIR mapping" in info.value.rejected.get("aten_sigmoid_default", "")
+    assert "export(..., helia_aot=" in str(info.value)
+    assert not any(tmp_path.iterdir()), "nothing is generated for a refused model"
+
+
+def test_compile_model_names_the_module_by_the_saved_program(tmp_path):
+    # The whole program is partition 0 of the saved .pt2; heliaAOT's plan names the model by that file.
+    import hashlib
+    import json
+
+    model, inputs = CASES["relu"]
+    compiled = compile_model(_quantized(model, inputs), None, _host_options(tmp_path))
+    (saved,) = tmp_path.glob("haot_*.pt2")
+    digest = hashlib.sha256(saved.read_bytes()).hexdigest()
+    assert compiled.name == f"haot_{digest[:10]}_0"
+    plan = json.loads((compiled.module_dir / f"{compiled.name}_plan.json").read_text())
+    assert plan["model"] == {"file": saved.name, "sha256": digest, "subgraph": 0}
+    # Compiling the same quantized model again names the same module: the saved program is reproducible.
+    again = compile_model(_quantized(model, inputs), None, _host_options(tmp_path / "again"))
+    assert again.name == compiled.name
+
+
+def test_compile_model_rejects_a_bad_name(tmp_path):
+    model, inputs = CASES["relu"]
+    with pytest.raises(ValueError, match="C identifier"):
+        compile_model(model.eval(), inputs, _host_options(tmp_path), name="kws-v1")
+
+
+@pytest.mark.parametrize("name", list(CASES))
+def test_compile_model_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
+    """The standalone module computes what the non-delegated ExecuTorch program does, byte for byte -- and so,
+    with test_bit_exact_on_host, what the delegate does."""
+    cc, ns_root, ns_lib = ns_cmsis_nn_lib
+    model, inputs = CASES[name]
+    quantized = _quantized(model, inputs)
+    reference = export(quantized, inputs, kernel_provider="ns", target_config=TARGET)
+    module_name = f"m_{name}"
+    compiled = compile_model(quantized, None, _host_options(tmp_path / "modules"), name=module_name)
+    exe = _build_standalone_runner(cc, ns_root, ns_lib, compiled.module_dir, module_name, tmp_path)
+    in_bounds = [_Boundary(t.scale, t.zero_point, t.qmin, t.qmax, t.dim_order) for t in compiled.inputs]
+    out_bounds = [_Boundary(t.scale, t.zero_point, t.qmin, t.qmax, t.dim_order) for t in compiled.outputs]
+
+    def run(in_paths, out_specs):
+        subprocess.run([str(exe), *_runner_args(in_paths, out_specs)], check=True)
+
+    _run_trials(name, inputs, reference, in_bounds, out_bounds, run, tmp_path)
