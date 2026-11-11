@@ -15,7 +15,7 @@
 # it fails fast at Method load on provider=arm builds.
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
 from executorch.backends.cortex_m.passes.cortex_m_pass_manager import (
@@ -28,6 +28,9 @@ from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 
 from .pass_manager_ns import NsCortexMPassManager
 from .quantizer_ns import NsCortexMQuantizer
+
+if TYPE_CHECKING:
+    from .helia_aot import HeliaAotOptions
 
 # Aten ops that the NS flow tries to accelerate. Anything from this set left
 # in the final graph fell back to the portable path (a qualifier failed) and
@@ -193,6 +196,7 @@ def export(
     calibration_samples: Optional[Sequence[tuple[Any, ...]]] = None,
     target_config: Optional[CortexMTargetConfig] = None,
     int8_io: bool = False,
+    helia_aot: Optional["HeliaAotOptions"] = None,
 ) -> ExportResult:
     """Quantize (if needed), lower and serialize `model` for the provider.
 
@@ -211,6 +215,14 @@ def export(
     `ExportResult.io_qparams` — the caller is then responsible for
     quantizing inputs and dequantizing outputs on the host side. The
     default keeps the float32 method boundary.
+
+    With `helia_aot=HeliaAotOptions(output_dir=...)` (kernel_provider="ns"),
+    the subgraphs heliaAOT can compile are delegated to HeliaAotBackend: each
+    becomes a heliaAOT NSX module in output_dir, and the PTE calls it through
+    the delegate. Everything else lowers as usual. The quantized program is
+    saved to output_dir as `<module_prefix>_<digest>.pt2`; each partition's
+    heliaAOT plan names it by that file and the partition's index. See
+    helia_aot/.
 
     Returns an ExportResult with the ExecutorchProgramManager, the edge op
     histogram and the list of NS-candidate aten ops that stayed on the
@@ -266,10 +278,18 @@ def export(
             "outputs": quantize_outputs.dequant_args,
         }
 
-    pass_manager = pass_manager_cls(
-        edge_manager.exported_program(), target_config=target_config
-    )
-    edge_manager._edge_programs["forward"] = pass_manager.transform()
+    if helia_aot is None:
+        pass_manager = pass_manager_cls(
+            edge_manager.exported_program(), target_config=target_config
+        )
+        edge_manager._edge_programs["forward"] = pass_manager.transform()
+    else:
+        if kernel_provider != "ns":
+            raise ValueError("helia_aot needs kernel_provider='ns' (heliaAOT links ns-cmsis-nn)")
+        from .helia_aot.codegen import save_program
+
+        source = save_program(final_export, helia_aot)
+        edge_manager = _lower_with_helia_aot(edge_manager, helia_aot, target_config, source)
 
     edge_ops = _count_edge_ops(edge_manager.exported_program())
     fallbacks = sorted(
@@ -286,3 +306,31 @@ def export(
         kernel_provider=kernel_provider,
         io_qparams=io_qparams,
     )
+
+
+def _lower_with_helia_aot(edge_manager, options, target_config, source):
+    """Delegate the int8 subgraphs heliaAOT converts, then lower the rest with the NS passes.
+
+    The partitioner and HeliaAotBackend read the quantized edge program before the NS passes, through
+    heliaAOT's PT2E front end; every delegate takes and returns int8 tensors. ``source`` is the saved quantized
+    program: each partition's heliaAOT plan names it by that file and the partition's index.
+    """
+    from executorch.exir.lowered_backend_module import LoweredBackendModule
+
+    from .helia_aot import BACKEND_ID, HeliaAotPartitioner
+    from .helia_aot.partitioner import duplicate_dequantizes, merge_dequantizes
+
+    # Before partitioning, not in the partitioner: ExecuTorch refuses a partitioner that changes the graph.
+    duplicate_dequantizes(edge_manager.exported_program().graph_module)
+    edge_manager = edge_manager.to_backend(HeliaAotPartitioner(options, source))
+    # Consumers that all stayed in ExecuTorch share one dequantize again.
+    merge_dequantizes(edge_manager.exported_program().graph_module)
+    edge_manager._edge_programs["forward"] = NsCortexMPassManager(
+        edge_manager.exported_program(), target_config=target_config
+    ).transform()
+    # The compile specs told HeliaAotBackend.preprocess() where and what to generate. ExecuTorch would write them
+    # into the PTE (output_dir, platform, the program file's name and digest); the runtime reads only the blob.
+    for module in edge_manager.exported_program().graph_module.modules():
+        if isinstance(module, LoweredBackendModule) and module.backend_id == BACKEND_ID:
+            module._compile_specs = []
+    return edge_manager
