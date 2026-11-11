@@ -12,6 +12,13 @@
 # A float32 .pt2 is PT2E-quantized here (--calibrate) before lowering; an
 # already-INT8 .pt2 skips quantization and goes straight to kernel matching.
 # Both take the same export() path as the Python API.
+#
+# With the ns provider and heliaAOT installed (the helia-aot extra), compile
+# uses heliaAOT by default (--helia-aot auto): a model heliaAOT fully covers
+# becomes one plain heliaAOT module with no ExecuTorch runtime, and any other
+# model a PTE that delegates the parts heliaAOT supports. --helia-aot module /
+# delegate force one path (module fails on a model heliaAOT does not fully
+# cover); --helia-aot off lowers to the cortex_m kernels only.
 
 from __future__ import annotations
 
@@ -93,9 +100,132 @@ def _calibration(spec: str, example: tuple) -> list[tuple]:
     return samples
 
 
+def _helia_aot_unusable() -> "str | None":
+    """Why heliaAOT cannot compile PyTorch models here, or None when it can.
+
+    helia-torch converts through heliaAOT's PT2E front end (helia_aot.converters.pt2e), which helia-aot has from
+    1.5: an older heliaAOT is installed but cannot be used.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("helia_aot") is None:
+        return "heliaAOT is not installed"
+    if importlib.util.find_spec("helia_aot.converters.pt2e") is None:
+        return "the installed heliaAOT has no PyTorch front end (it needs helia-aot >= 1.5)"
+    return None
+
+
+def _helia_aot_mode(args: argparse.Namespace) -> str:
+    """The --helia-aot mode to run: auto, module, delegate or off."""
+    mode = args.helia_aot
+    if mode == "off":
+        return mode
+    if args.provider != "ns":
+        if mode == "auto":
+            return "off"
+        raise SystemExit(
+            f"--helia-aot {mode} needs --provider ns (heliaAOT links ns-cmsis-nn)."
+        )
+    unusable = _helia_aot_unusable()
+    if unusable is not None:
+        if mode == "auto":
+            print(
+                f"note: {unusable}, so the model is lowered to the "
+                "cortex_m kernels only (pip install 'helia-torch[helia-aot]' to use it).",
+                file=sys.stderr,
+            )
+            return "off"
+        raise SystemExit(
+            f"--helia-aot {mode} needs heliaAOT, and {unusable}: pip install 'helia-torch[helia-aot]'."
+        )
+    return mode
+
+
+def _write_pte(result, output: Path, provider: str) -> None:
+    from .manifest import load_sidecar, lowering_report
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result.write_pte(output)  # sidecar written alongside
+    manifest = load_sidecar(output)
+    print(f"wrote {output} and {output}.json")
+    print(lowering_report(manifest))
+    if manifest["operators"]["portable"] and provider == "ns":
+        print(
+            "note: portable ops above stayed on the standard float kernels "
+            "(an NS qualifier declined them); see the ns lowering rules.",
+            file=sys.stderr,
+        )
+
+
+def _compile_with_helia_aot(args, exported, example, calibration, mode: str, output: Path) -> "int | None":
+    """Compile with heliaAOT and return the exit code, or None when --helia-aot auto should lower without it."""
+    from helia_aot.errors import HeliaAotError
+
+    from .helia_aot import HeliaAotOptions, NotFullyDelegableError, build
+
+    options = HeliaAotOptions(output_dir=args.helia_aot_dir or output.parent, debug_program=args.debug_program)
+    if args.platform is not None:
+        options.platform = args.platform
+    try:
+        built = build(
+            exported,
+            example,
+            options,
+            mode=mode,
+            name=args.name,
+            calibration_samples=calibration,
+            int8_io=args.int8_io,
+        )
+    except NotFullyDelegableError as exc:
+        raise SystemExit(
+            f"{args.model}: --helia-aot module needs a model heliaAOT fully covers.\n{exc}\n"
+            "Use --helia-aot auto or delegate to run the rest in ExecuTorch."
+        ) from None
+    except HeliaAotError as exc:
+        if mode != "auto":
+            raise SystemExit(f"{args.model}: heliaAOT could not compile the model.\n{exc}") from None
+        # auto must not do worse than no heliaAOT at all: the model still lowers to the cortex_m kernels.
+        print(
+            f"note: heliaAOT could not compile {args.model}, so the model is lowered to the cortex_m kernels "
+            f"only.\n  {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    if built.mode == "module":
+        compiled = built.compiled
+        print(
+            f"heliaAOT covers the whole model: wrote the module {compiled.module_dir} "
+            f"and its I/O contract {compiled.module_dir / (compiled.name + '_io.json')} "
+            "(no PTE; the application calls the module directly)"
+        )
+        if args.int8_io:
+            print("note: --int8-io has no effect on a module, whose I/O is always int8.", file=sys.stderr)
+        return 0
+
+    if built.module_error:
+        print(
+            "heliaAOT covers every operator but could not compile the model as one module, so the model is a "
+            f"PTE that delegates to heliaAOT:\n  {built.module_error}",
+            file=sys.stderr,
+        )
+    if built.rejected:
+        print(
+            f"heliaAOT does not cover {len(built.rejected)} operator(s), so the model is a PTE "
+            "that delegates the rest to heliaAOT:",
+            file=sys.stderr,
+        )
+        for node, reason in built.rejected.items():
+            print(f"  {node}: {reason}", file=sys.stderr)
+    _write_pte(built.export_result, output, args.provider)
+    print(f"heliaAOT modules: {options.output_dir}")
+    return 0
+
+
 def _cmd_compile(args: argparse.Namespace) -> int:
     from . import export, is_pt2e_quantized
 
+    mode = _helia_aot_mode(args)
     exported, example = _load_pt2(args.model)
     if is_pt2e_quantized(exported):
         if args.calibrate is not None:
@@ -106,6 +236,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
         calibration = None
     else:
         calibration = _calibration(args.calibrate or "random:8", example)
+    output = args.output or args.model.with_suffix(".pte")
+    if mode != "off":
+        code = _compile_with_helia_aot(args, exported, example, calibration, mode, output)
+        if code is not None:
+            return code
     result = export(
         exported,
         example,
@@ -113,20 +248,7 @@ def _cmd_compile(args: argparse.Namespace) -> int:
         calibration_samples=calibration,
         int8_io=args.int8_io,
     )
-    output = args.output or args.model.with_suffix(".pte")
-    result.write_pte(output)  # sidecar written alongside
-
-    from .manifest import load_sidecar, lowering_report
-
-    manifest = load_sidecar(output)
-    print(f"wrote {output} and {output}.json")
-    print(lowering_report(manifest))
-    if manifest["operators"]["portable"] and args.provider == "ns":
-        print(
-            "note: portable ops above stayed on the standard float kernels "
-            "(an NS qualifier declined them); see the ns lowering rules.",
-            file=sys.stderr,
-        )
+    _write_pte(result, output, args.provider)
     return 0
 
 
@@ -187,7 +309,46 @@ def main(argv: list[str] | None = None) -> int:
             "then quantize inputs / dequantize outputs itself"
         ),
     )
-    compile_parser.add_argument("-o", "--output", type=Path, help="Output .pte path")
+    compile_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="Output .pte path (default: the model's path with .pte); a heliaAOT module "
+        "build writes no PTE",
+    )
+    compile_parser.add_argument(
+        "--helia-aot",
+        choices=("auto", "module", "delegate", "off"),
+        default="auto",
+        help=(
+            "How heliaAOT runs the model (ns provider). auto (default): a plain heliaAOT "
+            "module with no ExecuTorch runtime when heliaAOT covers every operator, "
+            "otherwise a PTE delegating the parts it covers; falls back to off when "
+            "heliaAOT is not installed. module: always a plain module, an error if "
+            "heliaAOT does not cover the model. delegate: always a PTE. off: no heliaAOT."
+        ),
+    )
+    compile_parser.add_argument(
+        "--helia-aot-dir",
+        type=Path,
+        default=None,
+        help="Directory for the generated heliaAOT modules (default: the output's directory)",
+    )
+    compile_parser.add_argument(
+        "--name",
+        default=None,
+        help="C name of a plain heliaAOT module (default: haot_<digest>_0, from the saved program's SHA-256)",
+    )
+    compile_parser.add_argument(
+        "--platform",
+        default=None,
+        help="heliaAOT platform to generate for (default: heliaAOT's Apollo510 platform)",
+    )
+    compile_parser.add_argument(
+        "--debug-program",
+        action="store_true",
+        help="Also save the quantized program with its debug metadata, as haot_<digest>.debug.pt2",
+    )
     compile_parser.set_defaults(func=_cmd_compile)
 
     for name, func, help_text in (

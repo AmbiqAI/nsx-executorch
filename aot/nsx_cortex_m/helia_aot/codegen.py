@@ -190,10 +190,42 @@ def module_name_for(source, prefix: str) -> str:
     return name
 
 
-def generate_module(air_model, options: HeliaAotOptions, name: str) -> Path:
-    """Run heliaAOT on `air_model` and write an NSX module `<output_dir>/<name>` wired for the delegate."""
-    from helia_aot import AotConverter, ConvertArgs
+def apply_semantic_rules(cfg, air_model) -> None:
+    """Prepend SEMANTIC_OPERATOR_RULES for the operators `air_model` uses to heliaAOT ConvertArgs `cfg`."""
     from helia_aot.cli.defines import OperatorRuleset
+
+    present = {str(getattr(op.op_type, "name", op.op_type)) for op in air_model.operators}
+    rules = [r for r in SEMANTIC_OPERATOR_RULES if r["type"] in present]
+    cfg.operators = [OperatorRuleset(**rule) for rule in rules] + list(cfg.operators or [])
+
+
+def convert_air(air_model, cfg):
+    """Run heliaAOT on `air_model` with ConvertArgs `cfg` (module, platform, memory, ...) and return its
+    ConversionResult. The semantic operator rules (bit-exactness with ExecuTorch's kernels) are applied first,
+    to a copy of `cfg`: the caller's configuration is unchanged, so it can be used again.
+
+    `air_model.source` must name the file the model was converted from: heliaAOT's plan identifies the model by
+    it. program_to_air(..., source=AirModelSource.of_file(<the saved .pt2>)) sets it.
+    """
+    from helia_aot import AotConverter
+
+    if air_model.source is None:
+        raise ValueError(
+            "convert_air: the AIR model has no source. Save the quantized program (torch.export.save) and pass "
+            "program_to_air(..., source=helia_aot.air.AirModelSource.of_file(<that file>)), or set air.source."
+        )
+    cfg = cfg.model_copy(deep=True)
+    apply_semantic_rules(cfg, air_model)
+    return AotConverter(config=cfg).convert(air_model)
+
+
+def generate_module(air_model, options: HeliaAotOptions, name: str, *, executorch_registration: bool = True) -> Path:
+    """Run heliaAOT on `air_model` and write the NSX module `<output_dir>/<name>`.
+
+    With executorch_registration (the delegate), the module also registers itself with nsx-executorch's
+    HeliaAotBackend; without it (compile_model), it is a plain heliaAOT module.
+    """
+    from helia_aot import ConvertArgs
     from helia_aot.defines import ModuleType
 
     out_dir = Path(options.output_dir).expanduser().resolve()
@@ -211,13 +243,11 @@ def generate_module(air_model, options: HeliaAotOptions, name: str) -> Path:
         from helia_aot.platforms.defines import SocCapability
 
         cfg.platform.capabilities = [SocCapability(c) for c in options.capabilities]
-    present = {str(getattr(op.op_type, "name", op.op_type)) for op in air_model.operators}
-    rules = [r for r in SEMANTIC_OPERATOR_RULES if r["type"] in present]
-    cfg.operators = [OperatorRuleset(**rule) for rule in rules] + list(cfg.operators or [])
     cfg.force = True
-    AotConverter(config=cfg).convert(air_model)
+    convert_air(air_model, cfg)
     module_dir = out_dir / name
-    _write_registration(module_dir, name, len(air_model.input_ids), len(air_model.output_ids))
+    if executorch_registration:
+        _write_registration(module_dir, name, len(air_model.input_ids), len(air_model.output_ids))
     return module_dir
 
 
