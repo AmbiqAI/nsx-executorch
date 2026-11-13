@@ -203,6 +203,19 @@ def test_cli_prints_where_the_io_contract_is(covered_pt2, tmp_path, capsys):
     assert contract.is_file() and str(contract) in printed.replace("\n", "")
 
 
+def test_cli_test_case_gives_a_module_its_golden_data(covered_pt2, tmp_path, capsys):
+    assert _compile(covered_pt2, tmp_path, "--name", "net", "--test-case") == 0
+    out = tmp_path / "out"
+    assert (out / "net_golden.npz").is_file() and (out / "net" / "src" / "net_test_case.c").is_file()
+    assert "net_test_case_run()" in capsys.readouterr().out
+
+
+def test_cli_test_case_on_a_pte_is_a_note(mixed_pt2, tmp_path, capsys):
+    assert _compile(mixed_pt2, tmp_path, "--test-case") == 0
+    assert "--test-case has no effect on a PTE" in capsys.readouterr().err
+    assert not list((tmp_path / "out").glob("*_golden.npz"))
+
+
 def _fail_module_build(monkeypatch, fail_delegate=False):
     """Make heliaAOT refuse the whole model as one module (and, optionally, its partitions too)."""
     from helia_aot.errors import InvalidConfigError
