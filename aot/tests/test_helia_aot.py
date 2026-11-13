@@ -657,3 +657,88 @@ def test_compile_model_bit_exact_on_host(name, tmp_path, ns_cmsis_nn_lib):
         subprocess.run([str(exe), *_runner_args(in_paths, out_specs)], check=True)
 
     _run_trials(name, inputs, reference, in_bounds, out_bounds, run, tmp_path)
+
+
+# -- compile_model(test_inputs=...): heliaAOT's test case, with golden data made here ---------------------------
+
+_TEST_CASE_MAIN = """\
+#include "{name}_test_case.h"
+int main(void) {{ return {name}_test_case_init() != 0 ? 2 : ({name}_test_case_run() != 0 ? 1 : 0); }}
+"""
+
+
+def _run_test_case(cc, ns_root, ns_lib, module: Path, name: str, out: Path) -> int:
+    """Build the module with its generated test case and run it: 0 when every output is within tolerance."""
+    main_c = out / f"{name}_test_main.c"
+    main_c.write_text(_TEST_CASE_MAIN.format(name=name))
+    exe = out / f"{name}_test_case"
+    subprocess.run([cc, *_module_build_args(ns_root, module, name), str(module / "src" / f"{name}_test_case.c"),
+                    str(main_c), str(ns_lib), "-lm", "-o", str(exe)], check=True)
+    return subprocess.run([str(exe)], stdout=subprocess.DEVNULL).returncode
+
+
+def test_golden_data_is_the_int8_boundary_of_one_sample(tmp_path):
+    import numpy as np
+
+    model, inputs = CASES["kws_ds_cnn"]
+    compiled = compile_model(_quantized(model, inputs), None, _host_options(tmp_path), name="kws",
+                             test_inputs=inputs)
+    assert compiled.golden_data == tmp_path / "kws_golden.npz"
+    with np.load(compiled.golden_data) as golden:
+        assert sorted(golden.files) == ["input_0", "output_0"]
+        (x,), (y,) = compiled.inputs, compiled.outputs
+        assert golden["input_0"].dtype == golden["output_0"].dtype == np.int8
+        assert golden["input_0"].shape == x.physical_shape and golden["output_0"].shape == y.physical_shape
+        assert np.array_equal(golden["input_0"], x.quantize(inputs[0]).numpy())
+    assert (compiled.module_dir / "src" / "kws_test_case.c").is_file()
+    # Without test inputs there is no test case and no golden data.
+    plain = compile_model(_quantized(model, inputs), None, _host_options(tmp_path / "plain"), name="kws")
+    assert plain.golden_data is None and not (plain.module_dir / "src" / "kws_test_case.c").exists()
+
+
+# The last two are the operators whose reference kernels round a step differently from the device's.
+@pytest.mark.parametrize("name", ["kws_ds_cnn", "mul", "layer_scale", "avg_pool", "mean_channels_last"])
+def test_the_generated_test_case_passes_on_host(name, tmp_path, ns_cmsis_nn_lib):
+    cc, ns_root, ns_lib = ns_cmsis_nn_lib
+    model, inputs = CASES[name]
+    module_name = f"m_{name}"
+    compiled = compile_model(_quantized(model, inputs), None, _host_options(tmp_path / "modules"),
+                             name=module_name, test_inputs=inputs)
+    assert _run_test_case(cc, ns_root, ns_lib, compiled.module_dir, module_name, tmp_path) == 0
+
+
+def test_the_generated_test_case_fails_on_wrong_expected_outputs(tmp_path, ns_cmsis_nn_lib, monkeypatch):
+    from nsx_cortex_m.helia_aot import standalone
+
+    cc, ns_root, ns_lib = ns_cmsis_nn_lib
+    model, inputs = CASES["conv3x3_relu"]
+    real = standalone.golden_arrays
+
+    def off_by_three(*args):
+        arrays = real(*args)
+        arrays["output_0"] = arrays["output_0"] + (arrays["output_0"] < 100) * 3  # stays in int8
+        return {key: value.astype("int8") for key, value in arrays.items()}
+
+    monkeypatch.setattr(standalone, "golden_arrays", off_by_three)
+    compiled = compile_model(_quantized(model, inputs), None, _host_options(tmp_path / "modules"), name="wrong",
+                             test_inputs=inputs)
+    assert _run_test_case(cc, ns_root, ns_lib, compiled.module_dir, "wrong", tmp_path) != 0
+
+
+def test_a_test_setting_in_extra_is_kept(tmp_path):
+    model, inputs = CASES["conv1x1"]
+    options = _host_options(tmp_path)
+    options.extra = {"test": {"tolerance": 0}}
+    compiled = compile_model(_quantized(model, inputs), None, options, name="exact", test_inputs=inputs)
+    test_case = (compiled.module_dir / "src" / "exact_test_case.c").read_text()
+    assert "if (diff > (int)0.0)" in test_case and "if (diff > (int)1.0)" not in test_case
+    assert options.extra == {"test": {"tolerance": 0}}, "the caller's options are left alone"
+
+
+def test_test_inputs_that_do_not_fit_the_model_are_refused(tmp_path):
+    model, inputs = CASES["conv1x1"]
+    quantized = _quantized(model, inputs)
+    with pytest.raises(ValueError, match=r"has 1 input\(s\), but 2 test input\(s\)"):
+        compile_model(quantized, None, _host_options(tmp_path), test_inputs=(*inputs, *inputs))
+    with pytest.raises(ValueError, match="test input 0 has shape"):
+        compile_model(quantized, None, _host_options(tmp_path), test_inputs=(torch.randn(1, 16, 4, 4),))

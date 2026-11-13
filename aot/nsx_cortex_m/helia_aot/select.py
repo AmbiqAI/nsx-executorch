@@ -57,6 +57,7 @@ def build(
     calibration_samples: Optional[Sequence[tuple[Any, ...]]] = None,
     target_config=None,
     int8_io: bool = False,
+    test_inputs: Optional[Sequence[Any]] = None,
 ) -> HeliaAotBuild:
     """Compile `model` with heliaAOT, as a plain module when it can and through ExecuTorch otherwise.
 
@@ -64,6 +65,7 @@ def build(
     export(..., helia_aot=options) when it does not; "module" and "delegate" force one path. A float model is
     quantized once (ns quantizer, `calibration_samples`), so both paths see the same program. `name` names the
     plain module; `int8_io` applies to the delegate's PTE (a plain module's boundary is always int8).
+    `test_inputs` give a plain module heliaAOT's test case (see compile_model); a delegate build has none.
 
     In "auto", a model heliaAOT covers but cannot compile as one module (its HeliaAotError is kept in
     `module_error`) is also tried as a delegate.
@@ -84,7 +86,7 @@ def build(
     module_error = ""
     if mode != DELEGATE:
         try:
-            compiled = compile_model(program, example_inputs, options, name=name)
+            compiled = compile_model(program, example_inputs, options, name=name, test_inputs=test_inputs)
         except NotFullyDelegableError as exc:
             if mode == MODULE:
                 raise

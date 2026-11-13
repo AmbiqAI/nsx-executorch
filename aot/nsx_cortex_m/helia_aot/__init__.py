@@ -32,6 +32,7 @@ _EXPORTS = {
     "IoTensor": "standalone",
     "NotFullyDelegableError": "standalone",
     "compile_model": "standalone",
+    "golden_arrays": "standalone",
     "program_to_air": "standalone",
     "HeliaAotBuild": "select",
     "build": "select",
