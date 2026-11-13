@@ -178,8 +178,11 @@ def _compile_with_helia_aot(args, quantized, example, mode: str, output: Path) -
     options = HeliaAotOptions(output_dir=args.helia_aot_dir or output.parent, debug_program=args.debug_program)
     if args.platform is not None:
         options.platform = args.platform
+    test_inputs = _calibration(args.test_case, example)[0] if args.test_case is not None else None
     try:
-        built = build(quantized, example, options, mode=mode, name=args.name, int8_io=args.int8_io)
+        built = build(
+            quantized, example, options, mode=mode, name=args.name, int8_io=args.int8_io, test_inputs=test_inputs
+        )
     except NotFullyDelegableError as exc:
         raise SystemExit(
             f"{args.model}: --helia-aot module needs a model heliaAOT fully covers.\n{exc}\n"
@@ -203,10 +206,18 @@ def _compile_with_helia_aot(args, quantized, example, mode: str, output: Path) -
             f"and its I/O contract {compiled.module_dir / (compiled.name + '_io.json')} "
             "(no PTE; the application calls the module directly)"
         )
+        if compiled.golden_data is not None:
+            print(
+                f"test case: {compiled.name}_test_case_init() and {compiled.name}_test_case_run() check the "
+                f"module against {compiled.golden_data}"
+            )
         if args.int8_io:
             print("note: --int8-io has no effect on a module, whose I/O is always int8.", file=sys.stderr)
         return 0
 
+    if args.test_case is not None:
+        print("note: --test-case has no effect on a PTE: only a plain heliaAOT module has a test case.",
+              file=sys.stderr)
     if args.name is not None:
         print("note: --name names a plain heliaAOT module; the delegate's modules keep their own names.",
               file=sys.stderr)
@@ -349,6 +360,19 @@ def main(argv: list[str] | None = None) -> int:
         "--platform",
         default=None,
         help="heliaAOT platform to generate for (default: heliaAOT's Apollo510 platform)",
+    )
+    compile_parser.add_argument(
+        "--test-case",
+        nargs="?",
+        const="random:1",
+        default=None,
+        metavar="SAMPLES",
+        help=(
+            "Give a plain heliaAOT module a test case that runs one input and checks the outputs on the "
+            "target: <name>_test_case_run(). The input is the first sample of SAMPLES, 'random:N' (the "
+            "default) or an .npz of sample batches as for --calibrate; the expected outputs are computed "
+            "here and saved as <name>_golden.npz"
+        ),
     )
     compile_parser.add_argument(
         "--debug-program",
