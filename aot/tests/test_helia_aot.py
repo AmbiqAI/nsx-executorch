@@ -196,17 +196,15 @@ def test_a_partition_with_a_float_boundary_is_not_a_delegate(tmp_path):
     # Lowered directly, without the partitioner, the program takes and returns float tensors. heliaAOT would
     # import it (its int8 boundary is inside), but the runtime copies the ExecuTorch tensors as they are.
     from executorch.exir import to_edge
-    from helia_aot.air import AirModelSource
-
     from nsx_cortex_m.helia_aot.backend import HeliaAotBackend
-    from nsx_cortex_m.helia_aot.codegen import compile_specs_for
+    from nsx_cortex_m.helia_aot.codegen import ProgramSource, compile_specs_for
 
     model = Fn(lambda m, x: m["c"](x), c=torch.nn.Conv2d(4, 8, 1))
     inputs = (_cl(1, 4, 6, 6),)
     edge = to_edge(_quantized(model, inputs)).exported_program()
     saved = tmp_path / "model.pt2"
     saved.write_bytes(b"the saved program")  # heliaAOT reads the file for its digest
-    specs = compile_specs_for(HeliaAotOptions(output_dir=tmp_path), AirModelSource(saved))
+    specs = compile_specs_for(HeliaAotOptions(output_dir=tmp_path), ProgramSource(saved))
     with pytest.raises(ValueError, match="is torch.float32, not int8"):
         HeliaAotBackend.preprocess(edge, specs)
 

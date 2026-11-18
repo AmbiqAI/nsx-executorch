@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,12 +100,33 @@ class HeliaAotOptions:
 _DEBUG_METADATA = ("from_node", "nn_module_stack", "stack_trace")
 
 
-def save_program(program, options: HeliaAotOptions):
+@dataclass(frozen=True)
+class ProgramSource:
+    """The saved program file a model or a delegated partition is part of, and which part of it.
+
+    heliaAOT's plan names the model by them: they go to it as ``model.path`` and ``model.subgraph``, and it records
+    the file's name, the SHA-256 it takes of the file's bytes, and the index. ``sha256`` is that same digest, read
+    here when the source is built, for the module's name.
+
+    Raises:
+        OSError: If the file cannot be read.
+    """
+
+    path: Path
+    subgraph: int = 0
+    sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", Path(self.path))
+        object.__setattr__(self, "sha256", hashlib.sha256(self.path.read_bytes()).hexdigest())
+
+
+def save_program(program, options: HeliaAotOptions) -> ProgramSource:
     """Save the quantized program the delegate converts to ``output_dir`` and return its file's source.
 
     Each delegated partition is a part of this file: heliaAOT's plan names the partition by the file's name, the
     SHA-256 of its bytes and the partition's index, so a plan made for it matches the same file again. heliaAOT
-    takes the SHA-256 itself, from the file at the path the source is built with (``AirModelSource(path)``).
+    takes the SHA-256 itself, from the file ``model.path`` names when the partition is converted.
 
     The file, ``<prefix>_<digest>.pt2``, is the program without its debug metadata (``_DEBUG_METADATA``): the same
     quantized program then always saves to the same bytes, so exporting a model again gives the same digest, file
@@ -116,7 +138,6 @@ def save_program(program, options: HeliaAotOptions):
     import copy
 
     import torch
-    from helia_aot.air import AirModelSource
 
     out_dir = Path(options.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -126,18 +147,18 @@ def save_program(program, options: HeliaAotOptions):
             node.meta.pop(key, None)
     staging = out_dir / f".{options.module_prefix}_program.pt2.tmp"
     torch.export.save(reproducible, staging)
-    digest = AirModelSource(staging).sha256  # the file is named for its own digest, which heliaAOT takes
+    digest = ProgramSource(staging).sha256  # the file is named for its own digest, which heliaAOT takes too
     saved = out_dir / f"{options.module_prefix}_{digest[:10]}.pt2"
     staging.replace(saved)
     if options.debug_program:
         torch.export.save(program, saved.with_suffix(".debug.pt2"))
-    return AirModelSource(saved)
+    return ProgramSource(saved)
 
 
 def compile_specs_for(options: HeliaAotOptions, source=None, partition: int = 0) -> list:
     """The delegate's compile specs: ``options``, and the path of the program file ``source`` names with the
-    partition's index. The backend builds the partition's source from the path, so heliaAOT reads the file and
-    takes its SHA-256 there: no digest travels in the specs."""
+    partition's index. The backend gives heliaAOT the path, which reads the file and takes its SHA-256 itself: no
+    digest travels in the specs."""
     from executorch.exir.backend.compile_spec_schema import CompileSpec
 
     specs = [
@@ -168,11 +189,9 @@ def options_from_specs(specs) -> HeliaAotOptions:
     )
 
 
-def source_from_specs(specs):
+def source_from_specs(specs) -> ProgramSource:
     """The partition's source: the saved program file, which heliaAOT reads for its SHA-256, and the partition's
     index. Raises ValueError if a spec is missing or the file cannot be read."""
-    from helia_aot.air import AirModelSource
-
     values = {s.key: s.value.decode() for s in specs}
     missing = [key for key in ("source_path", "partition") if key not in values]
     if missing:
@@ -181,7 +200,7 @@ def source_from_specs(specs):
             "part of (HeliaAotPartitioner sets them from save_program())"
         )
     try:
-        return AirModelSource(Path(values["source_path"]), subgraph=int(values["partition"]))
+        return ProgramSource(Path(values["source_path"]), subgraph=int(values["partition"]))
     except OSError as err:
         raise ValueError(
             f"HeliaAotBackend cannot read the program file {values['source_path']} the partition is part of "
@@ -197,8 +216,11 @@ def module_name_for(source, prefix: str) -> str:
     return name
 
 
-def generate_module(air_model, options: HeliaAotOptions, name: str) -> Path:
-    """Run heliaAOT on `air_model` and write an NSX module `<output_dir>/<name>` wired for the delegate."""
+def generate_module(air_model, options: HeliaAotOptions, name: str, source: ProgramSource) -> Path:
+    """Run heliaAOT on `air_model` and write an NSX module `<output_dir>/<name>` wired for the delegate.
+
+    `source` is the saved program file the model was made from and which partition of it the model is: heliaAOT's
+    plan identifies the model by them (``model.path`` and ``model.subgraph``)."""
     from helia_aot import AotConverter, ConvertArgs
     from helia_aot.cli.defines import OperatorRuleset
     from helia_aot.defines import ModuleType
@@ -209,6 +231,8 @@ def generate_module(air_model, options: HeliaAotOptions, name: str) -> Path:
     args = dict(options.extra)
     cfg = ConvertArgs(**args) if args else ConvertArgs()
     cfg.model.name = name
+    cfg.model.path = source.path
+    cfg.model.subgraph = source.subgraph
     cfg.module.path = out_dir
     cfg.module.name = name
     cfg.module.prefix = name

@@ -57,10 +57,10 @@ class HeliaAotBackend(BackendDetails):
     def preprocess(edge_program, compile_specs) -> PreprocessResult:
         options = options_from_specs(list(compile_specs))
         source = source_from_specs(list(compile_specs))
-        imported = import_program(edge_program, name="partition", source=source)
+        imported = import_program(edge_program, name="partition")
         air = imported.model
         name = module_name_for(source, options.module_prefix)
-        module_dir = generate_module(air, options, name)
+        module_dir = generate_module(air, options, name, source)
 
         graph = edge_program.graph_module.graph
         user_inputs = {s.arg.name for s in edge_program.graph_signature.input_specs if s.kind.name == "USER_INPUT"}
