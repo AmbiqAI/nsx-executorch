@@ -211,10 +211,10 @@ def _fail_module_build(monkeypatch, fail_delegate=False):
 
     real = codegen.generate_module
 
-    def generate(air, options, name, **kwargs):
+    def generate(air, options, name, source, **kwargs):
         if fail_delegate or kwargs.get("executorch_registration", True) is False:
             raise InvalidConfigError("the model does not fit the platform")
-        return real(air, options, name, **kwargs)
+        return real(air, options, name, source, **kwargs)
 
     monkeypatch.setattr(standalone, "generate_module", generate)
     monkeypatch.setattr(codegen, "generate_module", generate)
@@ -257,19 +257,20 @@ def test_a_program_that_cannot_be_imported_is_not_reported_as_uncovered_operator
     assert not any(tmp_path.iterdir())
 
 
-def test_convert_air_needs_a_source_and_leaves_the_configuration_alone(tmp_path):
+def test_convert_air_needs_the_models_file_and_leaves_the_configuration_alone(tmp_path):
     from helia_aot import ConvertArgs
-    from helia_aot.air import AirModelSource
+    from helia_aot.errors import InvalidConfigError
 
     from nsx_cortex_m.helia_aot.codegen import convert_air
     from nsx_cortex_m.helia_aot.standalone import program_to_air
 
     quantized = _quantized(ConvRelu())
-    with pytest.raises(ValueError, match="has no source"):
-        convert_air(program_to_air(quantized).air, ConvertArgs())
+    with pytest.raises(InvalidConfigError, match="needs model.path to name the file"):
+        convert_air(program_to_air(quantized).air, ConvertArgs())  # model.path left at its default
     saved = tmp_path / "model.pt2"
     torch.export.save(quantized, saved)
     cfg = ConvertArgs.model_validate({
+        "model": {"path": str(saved)},  # the saved program: heliaAOT's plan names the model by it
         "module": {"path": str(tmp_path / "out"), "name": "net", "prefix": "net"},
         "platform": {"name": "apollo4p_evb"},
         "force": True,
@@ -277,7 +278,7 @@ def test_convert_air_needs_a_source_and_leaves_the_configuration_alone(tmp_path)
     })
     before = cfg.model_dump(mode="json")
     for _ in range(2):  # a configuration can be used again: the semantic rules go on a copy
-        air = program_to_air(quantized, source=AirModelSource.of_file(saved)).air
+        air = program_to_air(quantized).air
         convert_air(air, cfg)
     assert cfg.model_dump(mode="json") == before
 
