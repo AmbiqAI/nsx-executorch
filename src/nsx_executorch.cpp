@@ -261,6 +261,12 @@ extern "C" void et_pal_emit_log_message(
 extern "C" void* et_pal_allocate(std::size_t) { return nullptr; }
 extern "C" void et_pal_free(void*) {}
 
+#if defined(NSX_EXECUTORCH_ENABLE_HELIA_AOT)
+namespace nsx::executorch::detail {
+void register_helia_aot_backend();  // src/helia_aot_backend.cpp
+}  // namespace nsx::executorch::detail
+#endif
+
 namespace nsx::executorch {
 
 RunResult run_once_profiled(
@@ -300,6 +306,9 @@ RunResult run_once_profiled(
 #endif
 
   ::executorch::runtime::runtime_init();
+#if defined(NSX_EXECUTORCH_ENABLE_HELIA_AOT)
+  detail::register_helia_aot_backend();
+#endif
   BufferDataLoader loader(program_data, program_size);
 #if defined(NSX_EXECUTORCH_VERIFY_PROGRAM)
   // NSX_EXECUTORCH_ENABLE_PROGRAM_VERIFICATION builds the flatbuffer

@@ -179,6 +179,96 @@ Tier 1 restrictions (documented qualifiers; anything else falls back):
 Follow-up tiers (later PRs): sigmoid/tanh int16, data-movement ops, further
 reductions, LSTM/SVDF.
 
+## heliaAOT delegate (`HeliaAotBackend`)
+
+helia-torch can hand the parts of a model that [heliaAOT](https://ambiqai.github.io/helia-aot/) compiles to
+an ExecuTorch delegate. heliaAOT turns them into plain C with per-layer kernel selection and whole-graph
+memory planning, so they run without the ExecuTorch interpreter's per-operator overhead. Everything else
+runs as usual.
+
+```python
+from nsx_cortex_m.export import export
+from nsx_cortex_m.helia_aot import HeliaAotOptions
+
+result = export(model, example_inputs, kernel_provider="ns",
+                helia_aot=HeliaAotOptions(output_dir="build/helia_aot"))  # pip install 'helia-torch[helia-aot]'
+result.write_pte("model.pte")
+```
+
+**What gets delegated.** The partitioner runs on the quantized edge program before the NS passes, where each
+int8 operator is still `dequantize -> aten op -> quantize`. heliaAOT's PT2E front end
+(`helia_aot.converters.pt2e`, heliaAOT ≥ 1.5) decides support group by group and converts the partitions, so the
+partitioner claims exactly what converts. In int8, that covers:
+
+- convolution, depthwise and transposed convolution;
+- linear and bmm;
+- add, sub, mul, maximum and minimum;
+- relu (and relu6 / ±1 / 0..1 bounds), leaky relu, hard swish and softmax;
+- max and average pooling, mean, pad, transpose and reshape;
+- requantization.
+
+Float↔int8 conversions at a partition's edges stay ExecuTorch `cortex_m` kernels, so each delegate exchanges
+int8 tensors. Anything else (for example a fused `hardtanh` whose bounds clamp inside the output's int8 range)
+stays in ExecuTorch and lowers through the NS passes as usual.
+
+**What export writes.**
+
+- **The quantized program**, saved as `output_dir/haot_<digest>.pt2`. heliaAOT's plan for each partition names
+  the model by this file (its name and the SHA-256 of its bytes, which `shasum -a 256` reproduces) and the
+  partition's index, so a plan made for a partition matches the same file again. The file is the program without
+  its debug metadata (stack traces and module paths, which PyTorch writes differently on every export), so
+  exporting the same quantized model again gives the same file, digest and module names; a model that differs in
+  any weight or operator gets others. It loads with `torch.export.load()`, and `helia-torch compile` rebuilds from
+  it. `HeliaAotOptions(debug_program=True)` also saves `haot_<digest>.debug.pt2`, the program with that metadata.
+- **One heliaAOT NSX module per partition** in `output_dir`, named `haot_<digest>_<partition>` after that file.
+  Each module includes `et/<name>_et_registration.c`, which registers the module with the runtime.
+- **The PTE.** It holds only the delegate blob (module name and int8 tensor contract), not the compiled code.
+  For the MLPerf Tiny KWS DS-CNN the PTE shrinks to 9.4 KB.
+- **The sidecar**, which records `requires_helia_aot` and `helia_aot_modules`.
+
+**Firmware.** Build with `NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns` and `NSX_EXECUTORCH_ENABLE_HELIA_AOT=ON` (the arm
+provider is rejected, because heliaAOT modules link ns-cmsis-nn). List the generated modules after
+`nsx-cmsis-nn` in `nsx.yml`, and link them into the app.
+
+- `run_once()` registers `HeliaAotBackend` (`src/helia_aot_backend.cpp`).
+- Each module's registration file is an INTERFACE source, so it is compiled into the application and always
+  runs.
+- At Method load the backend looks the module up by name (`includes-api/nsx_helia_aot.h`) and checks the
+  blob's tensor contract.
+- `execute()` copies the delegate's int8 inputs in, runs the module, and copies its outputs out.
+
+**Numerics.** A delegate computes exactly what the non-delegated program computes:
+
+- **Host tests.** `aot/tests/test_helia_aot.py` compiles each operator's generated module with ns-cmsis-nn on
+  the host and compares it byte for byte with ExecuTorch's reference kernels (34 cases, including broadcasting operands, padding that is neither SAME nor VALID, and the whole KWS DS-CNN).
+- **heliaAOT settings.** The delegate sets the heliaAOT attributes this needs. For example, `HARD_SWISH` runs
+  the precise backend, like `arm_hard_swish_precise_s8`, not heliaAOT's default lookup table.
+- **A reference that does not match its kernel.** ExecuTorch's Python reference for
+  `cortex_m::quantized_avg_pool2d` averages in float and rounds half to even, but the kernel it describes,
+  `arm_avgpool_s8`, rounds half away from zero. The tests hold the delegate to the kernel's behavior.
+- **Operators ExecuTorch leaves in float.** nsx-executorch lowers a mean to `cortex_m_ns::quantized_mean` only
+  for a contiguous tensor, so without the delegate a mean over a channels_last tensor (global average pooling)
+  runs on the float kernels. The delegate computes it with the int8 kernel, which matches the float result to
+  one LSB; the tests hold it to the int8 operator's reference.
+- **On the board.** On an Apollo510 EVB (Cortex-M55 MVE, ns-cmsis-nn 7.47.0), the KWS DS-CNN through the
+  ExecuTorch runtime and the delegate matched the non-delegated reference bit for bit on 8/8 vectors.
+  `Method::execute()` took about 1.625 M cycles, against 1.653 M for the same model on the ExecuTorch Cortex-M
+  kernels.
+
+**Limits.**
+
+- **One instance per module.** Each module has one static context, so a model cannot run twice concurrently.
+- **Eight modules by default.** The registry holds `NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS` modules (default 8),
+  one per delegated partition of every PTE the firmware runs. `helia-torch report` says when a model needs more,
+  and the backend logs how many modules did not fit when a PTE names one it cannot find.
+- **Module names** are at most 63 bytes; a longer `module_prefix` fails the export.
+- **Delegates are int8 in, int8 out.** `export(helia_aot=...)` leaves the float conversions in ExecuTorch;
+  lowering a float-boundary program to `HeliaAotBackend` directly is refused.
+- **Transposed convolution** needs `output_padding == 0`, `groups == 1` and no dilation.
+- **Profiling.** A delegate reports as one operator event (`HeliaAotBackend`).
+- **heliaAOT version.** The generated modules need the heliaAOT version helia-torch was installed with
+  (`helia-aot>=1.5,<2`).
+
 ## Source setup and validation
 
 Clone with the pinned ExecuTorch submodule:
