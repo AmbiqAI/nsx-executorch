@@ -115,6 +115,9 @@ function(case_delegated)
     CORTEX_M "cortex_m::quantize_per_tensor.out" "cortex_m::dequantize_per_tensor.out"
     MODULES haot_0123456789)
   nsx_executorch_configure_from_sidecars("${WORK}/kws.pte.json")
+  expect(delegated.cortex_m "${NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST}"
+         "cortex_m::dequantize_per_tensor.out,cortex_m::quantize_per_tensor.out")
+  expect(delegated.ns "${NSX_EXECUTORCH_NS_SELECT_OPS_LIST}" NONE)
   expect(delegated.helia_aot "${NSX_EXECUTORCH_ENABLE_HELIA_AOT}" ON)
   expect(delegated.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" "")
   expect(delegated.portable "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}" "")
@@ -125,13 +128,18 @@ case_delegated()
 # -- two models: union of operators and modules, NS ops when one needs them ----
 function(case_union)
   write_sidecar(a PTE "a"
+    CORTEX_M "cortex_m::quantized_add.out"
     NS "cortex_m_ns::quantized_mean.out"
     PORTABLE "aten::sub.out" "aten::clamp.out"
     MODULES haot_aaaaaaaaaa)
   write_sidecar(b PTE "b"
+    CORTEX_M "cortex_m::quantized_linear.out" "cortex_m::quantized_add.out"
     PORTABLE "aten::clamp.out" "aten::leaky_relu.out"
     MODULES haot_bbbbbbbbbb haot_aaaaaaaaaa)
   nsx_executorch_configure_from_sidecars("${WORK}/a.pte.json" "${WORK}/b.pte.json")
+  expect(union.cortex_m "${NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST}"
+         "cortex_m::quantized_add.out,cortex_m::quantized_linear.out")
+  expect(union.ns "${NSX_EXECUTORCH_NS_SELECT_OPS_LIST}" "cortex_m_ns::quantized_mean.out")
   expect(union.portable "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}"
          "aten::clamp.out,aten::leaky_relu.out,aten::sub.out")
   expect(union.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" ON)
@@ -150,12 +158,53 @@ function(case_extra_portable)
 endfunction()
 case_extra_portable()
 
+# -- extra cortex_m:: operators from -D; a NONE given there selects nothing ---
+function(case_extra_cortex_m)
+  write_sidecar(e PTE "e" CORTEX_M "cortex_m::quantized_add.out")
+  set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST "cortex_m::softmax.out")
+  set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "NONE")
+  nsx_executorch_configure_from_sidecars("${WORK}/e.pte.json")
+  expect(extra.cortex_m "${NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST}"
+         "cortex_m::quantized_add.out,cortex_m::softmax.out")
+  expect(extra.ns "${NSX_EXECUTORCH_NS_SELECT_OPS_LIST}" NONE)
+  expect(extra.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" "")
+endfunction()
+case_extra_cortex_m()
+
+# -- NSX_EXECUTORCH_REGISTER_ALL_OPS empties the cortex_m and NS lists, even ones
+# -- an earlier configure cached, and switches the NS operators on with the ns provider
+function(case_register_all)
+  write_sidecar(f PTE "f" CORTEX_M "cortex_m::quantized_add.out" PORTABLE "aten::sub.out"
+    MODULES haot_dddddddddd)
+  set(NSX_EXECUTORCH_REGISTER_ALL_OPS ON)
+  set(NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST "cortex_m::softmax.out")  # as cached by an earlier configure
+  set(NSX_EXECUTORCH_NS_SELECT_OPS_LIST "NONE")
+  nsx_executorch_configure_from_sidecars("${WORK}/f.pte.json")
+  expect(all.cortex_m "${NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST}" "")
+  expect(all.ns "${NSX_EXECUTORCH_NS_SELECT_OPS_LIST}" "")
+  expect(all.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" ON)  # the delegate selected the ns provider
+  expect(all.portable "${NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST}" "aten::sub.out")
+  expect(all.helia_aot "${NSX_EXECUTORCH_ENABLE_HELIA_AOT}" ON)
+endfunction()
+case_register_all()
+function(case_register_all_arm)
+  write_sidecar(g PTE "g" CORTEX_M "cortex_m::quantized_add.out")
+  set(NSX_EXECUTORCH_REGISTER_ALL_OPS ON)
+  set(NSX_EXECUTORCH_CMSIS_NN_PROVIDER arm)
+  nsx_executorch_configure_from_sidecars("${WORK}/g.pte.json")
+  expect(all_arm.cortex_m "${NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST}" "")
+  expect(all_arm.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" "")  # cortex_m_ns:: needs the ns provider
+endfunction()
+case_register_all_arm()
+
 # -- an option already ON stays ON ---------------------------------------------
 function(case_never_switched_off)
   write_sidecar(d PTE "d" CORTEX_M "cortex_m::quantized_add.out")
   set(NSX_EXECUTORCH_ENABLE_NS_OPS ON)
   nsx_executorch_configure_from_sidecars("${WORK}/d.pte.json")
   expect(on.ns_ops "${NSX_EXECUTORCH_ENABLE_NS_OPS}" ON)
+  # No sidecar lists a cortex_m_ns:: operator, but NONE would cancel the option set by hand.
+  expect(on.ns_list "${NSX_EXECUTORCH_NS_SELECT_OPS_LIST}" "")
 endfunction()
 case_never_switched_off()
 

@@ -111,7 +111,26 @@ jobs:
             -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn" \
             -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON
           cmake --build build/real-ns-ops \
-            --target cortex_m_ns_kernels cortex_m_ns_ops_lib --parallel 2
+            --target cortex_m_ns_kernels cortex_m_ns_ops_lib cortex_m_ops_lib --parallel 2
+          # Without select lists (the default) every operator is registered:
+          # stock cortex_m_ops_lib is used, no nsx_cortex_m_ops_lib is made,
+          # and both registration libraries reference every schema operator.
+          if cmake --build build/real-ns-ops --target help | grep -q nsx_cortex_m_ops_lib; then
+            echo "::error::default build generated nsx_cortex_m_ops_lib"; exit 1
+          fi
+          registered() {
+            arm-none-eabi-nm -C -u "$(find build/real-ns-ops -name "lib$1.a" | head -n1)" |
+              grep -oE 'cortex_m(_ns)?::native::[a-z0-9_]+_out' | sort -u | wc -l | tr -d ' '
+          }
+          for pair in \
+              "cortex_m_ops_lib external/executorch/backends/cortex_m/ops/operators.yaml" \
+              "cortex_m_ns_ops_lib ops-ns/operators_ns.yaml"; do
+            set -- $pair
+            want="$(grep -c '^- func:' "$2")"
+            got="$(registered "$1")"
+            test "$got" = "$want" || {
+              echo "::error::$1 registers $got operators, $2 defines $want"; exit 1; }
+          done
 
       # The release heliaPROFILER links; later steps build against it.
       - name: Fetch ns provider v7.47.0
@@ -148,6 +167,74 @@ jobs:
             echo "::error::NSX_EXECUTORCH_ENABLE_HELIA_AOT was accepted with the arm provider"
             exit 1
           fi
+
+      - name: Build with selective operator registration
+        run: |
+          cmake -S tests/real-provider -B build/real-ns-select -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
+            -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST="cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out" \
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST="cortex_m_ns::quantized_mean.out"
+          cmake --build build/real-ns-select \
+            --target nsx_cortex_m_ops_lib cortex_m_ns_ops_lib --parallel 2
+          # The registration libraries must reference exactly the selection.
+          registered() {
+            arm-none-eabi-nm -C -u "$(find build/real-ns-select -name "lib$1.a" | head -n1)" |
+              grep -oE 'cortex_m(_ns)?::native::[a-z0-9_]+_out' | sort -u | tr '\n' ' '
+          }
+          got="$(registered nsx_cortex_m_ops_lib)"
+          want="cortex_m::native::dequantize_per_tensor_out cortex_m::native::quantize_per_tensor_out cortex_m::native::quantized_linear_out "
+          test "$got" = "$want" || { echo "::error::cortex_m registrations: $got"; exit 1; }
+          got="$(registered cortex_m_ns_ops_lib)"
+          test "$got" = "cortex_m_ns::native::quantized_mean_out " || {
+            echo "::error::cortex_m_ns registrations: $got"; exit 1; }
+          # An unknown operator name must fail at configure time.
+          if cmake -S tests/real-provider -B build/real-ns-select-typo -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+              -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+              -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+              -DNSX_EXECUTORCH_TEST_MODE=nsx \
+              -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+              -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+              -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST="cortex_m::quantised_add.out" \
+              > build/select-typo.log 2>&1; then
+            echo "::error::misspelled select-ops entry was accepted"
+            exit 1
+          fi
+          # ...for that reason, not for another one.
+          tr -s ' \n' ' ' < build/select-typo.log |
+            grep -q "names 'cortex_m::quantised_add.out', which .* does not define" || {
+              cat build/select-typo.log
+              echo "::error::the misspelled select-ops entry failed for another reason"
+              exit 1
+            }
+          # NONE: no registration library for either namespace is linked into nsx_executorch.
+          cmake -S tests/real-provider -B build/real-ns-select-none -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/tests/real-provider/arm-none-eabi-gcc.cmake" \
+            -DNSX_EXECUTORCH_TEST_ROOT="$GITHUB_WORKSPACE" \
+            -DNSX_EXECUTORCH_TEST_PROVIDER=ns \
+            -DNSX_EXECUTORCH_TEST_MODE=nsx \
+            -DNSX_EXECUTORCH_TEST_ARM_ROOT="$GITHUB_WORKSPACE/build/providers/arm-cmsis-nn" \
+            -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
+            -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
+            -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST=NONE \
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=NONE
+          (cd build/real-ns-select-none && cmake --graphviz=deps.dot . > /dev/null)
+          python3 - build/real-ns-select-none/deps.dot <<'PY'
+          import re, sys
+          dot = open(sys.argv[1]).read()
+          labels = dict(re.findall(r'"(node\d+)" \[ label = "([^"]+)"', dot))
+          adapter = {n for n, label in labels.items() if label.startswith("nsx_executorch\\n")}
+          linked = {labels[b] for a, b in re.findall(r'"(node\d+)" -> "(node\d+)"', dot) if a in adapter}
+          bad = sorted(t for t in linked if t.endswith("ops_lib") or t in ("cortex_m_kernels", "cortex_m_ns_kernels"))
+          if not adapter or bad:
+              sys.exit(f"::error::NONE still links {bad or 'no nsx_executorch target'}")
+          PY
 
   atfe-cross-build:
     runs-on: ubuntu-24.04
