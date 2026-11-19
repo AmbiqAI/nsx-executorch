@@ -154,7 +154,9 @@ helia-profiler looks for a delegate's modules); `--name` names a plain module an
 heliaAOT platform. `auto` never does worse than `off`: it falls back to `off` with the `arm` provider, and,
 with a note saying why, when heliaAOT is not installed, has no PyTorch front end (before 1.5) or cannot compile
 the model; the explicit modes fail instead. A model heliaAOT covers but cannot compile as one module is tried as
-a delegate first. `build()` in `nsx_cortex_m.helia_aot` is the Python equivalent.
+a delegate first. `--test-case` gives a plain module a test case that checks its outputs on the target (see
+[compile_model](#whole-model-in-heliaaot-without-executorch-compile_model)). `build()` in
+`nsx_cortex_m.helia_aot` is the Python equivalent.
 
 A PTE build writes `model.pte` plus a `model.pte.json` sidecar (schema
 `nsx-executorch.pte-manifest/1`), SHA-256-bound to that exact PTE. The
@@ -315,6 +317,15 @@ compiled.inputs[0].quantize(x)   # float, logical shape -> int8 bytes in the mod
   default).
 - **The boundary is the application's.** The module takes and returns int8 tensors in their physical (dim
   order) layout, NHWC for channels_last; `IoTensor.quantize()` / `dequantize()` convert.
+- **Test case.** With `test_inputs=(x, ...)` (`helia-torch compile --test-case`), the module also carries
+  heliaAOT's test case: `kws_test_case_init()` and `kws_test_case_run()` run those inputs on the target and
+  compare the outputs with the expected ones, returning 0 when they agree. heliaAOT cannot run a PyTorch program
+  to make that data, so it is made here and saved as `build/kws_golden.npz` (`input_N` / `output_N`, int8, in
+  the module's layout). The expected outputs come from the model's reference kernels (the quantized program
+  lowered without heliaAOT), which the module matches byte for byte; the quantized program run in PyTorch
+  would differ by a step or two. heliaAOT's default tolerance of one step covers the two operators whose
+  reference kernels round differently from the device's (an average pool on a tie, a channels_last mean); set
+  another with `HeliaAotOptions(extra={"test": {"tolerance": 0}})`. A delegate's modules have no test case.
 - **What it saves.** On an Apollo510 EVB the KWS DS-CNN as a standalone module took 1,622,688 cycles and
   152,788 bytes of flash, against 1,625,907 cycles and 195,776 bytes through the ExecuTorch runtime and the
   delegate (int8 I/O, no `cortex_m` operators registered). The difference is the runtime (about 26 KB), the PTE,
