@@ -148,6 +148,51 @@ checkout's path, and a board. The compile step also prints a lowering
 report that flags any `[PORTABLE]` fallback loudly: a portable op runs on
 the standard float kernels and typically dominates per-op cost on target.
 
+### Configuring firmware from sidecars
+
+An app's CMake can take its nsx-executorch configuration from the sidecars
+instead of copying operator lists and module names by hand
+(`cmake/nsx_executorch_sidecar.cmake`):
+
+```cmake
+include(<nsx-executorch>/cmake/nsx_executorch_sidecar.cmake)
+
+# Before nsx-executorch is configured (before nsx_bootstrap_app()):
+nsx_executorch_configure_from_sidecars(build/kws.pte.json build/vww.pte.json)
+
+# After it, once the app target exists:
+nsx_executorch_link_helia_aot_modules(app
+    MODULES_DIR build/helia_aot)    # omit when nsx.yml lists the modules
+```
+
+- `nsx_executorch_configure_from_sidecars()` sets
+  `NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST` to the union of the models'
+  portable fallbacks, switches on `NSX_EXECUTORCH_ENABLE_NS_OPS` and
+  `NSX_EXECUTORCH_ENABLE_HELIA_AOT` when a model needs them, and records the
+  heliaAOT modules the programs call. It sets normal variables, so they take
+  precedence over the cache and follow the sidecars on every configure; a
+  portable list given with `-D` is added to the union, and an option already
+  ON stays ON.
+- A model that needs `cortex_m_ns::` operators or heliaAOT needs the ns
+  provider: the function selects `NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns` when
+  none is set, and fails, naming the sidecar, when another one is. It also
+  raises `NSX_EXECUTORCH_HELIA_AOT_MAX_MODELS` when the models call more
+  modules than the registry holds.
+- Several sidecars configure what all of them need, so firmware can swap
+  between a fixed set of models. Calling the function once per model does
+  the same: each call adds to what the earlier ones set.
+- When the PTE sits next to its sidecar, its SHA-256 must match the one the
+  sidecar records, so a stale sidecar fails the configure instead of
+  `Method::load` on the target. Each sidecar, and its PTE when it is there,
+  is a configure dependency: re-exporting a model reconfigures the build.
+- `nsx_executorch_link_helia_aot_modules()` links each recorded heliaAOT
+  module into the app, adding it from `MODULES_DIR` when it is not already in
+  the build, and fails the configure when a module is in neither place.
+  `MODULES <name>...` links those modules instead of the sidecars'; `MODULES`
+  with no names links none.
+
+helia-profiler reads the sidecar itself and does not need these functions.
+
 Memory *placement* is intentionally not in the sidecar: sizes are export
 facts, but which RAM region each caller-owned arena lives in is a
 board-pressure decision made by the consumer (helia-profiler's
@@ -228,7 +273,8 @@ stays in ExecuTorch and lowers through the NS passes as usual.
 
 **Firmware.** Build with `NSX_EXECUTORCH_CMSIS_NN_PROVIDER=ns` and `NSX_EXECUTORCH_ENABLE_HELIA_AOT=ON` (the arm
 provider is rejected, because heliaAOT modules link ns-cmsis-nn). List the generated modules after
-`nsx-cmsis-nn` in `nsx.yml`, and link them into the app.
+`nsx-cmsis-nn` in `nsx.yml`, and link them into the app. `nsx_executorch_configure_from_sidecars()` and
+`nsx_executorch_link_helia_aot_modules()` do both from the sidecar (see "Configuring firmware from sidecars").
 
 - `run_once()` registers `HeliaAotBackend` (`src/helia_aot_backend.cpp`).
 - Each module's registration file is an INTERFACE source, so it is compiled into the application and always
