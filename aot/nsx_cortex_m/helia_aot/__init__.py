@@ -2,7 +2,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# ExecuTorch delegate that compiles supported subgraphs with heliaAOT.
+# ExecuTorch delegate that compiles supported subgraphs with heliaAOT, and
+# compile_model(), which compiles a whole model with heliaAOT and no
+# ExecuTorch runtime (see standalone.py). build() picks between them: a plain
+# module when heliaAOT covers the whole model, the delegate otherwise (see
+# select.py).
 #
 #   export(model, inputs, kernel_provider="ns",
 #          helia_aot=HeliaAotOptions(output_dir="build/helia_aot"))
@@ -22,6 +26,15 @@ _EXPORTS = {
     "DelegateBlob": "blob",
     "TensorContract": "blob",
     "HeliaAotOptions": "codegen",
+    "convert_air": "codegen",
+    "AirProgram": "standalone",
+    "CompiledModel": "standalone",
+    "IoTensor": "standalone",
+    "NotFullyDelegableError": "standalone",
+    "compile_model": "standalone",
+    "program_to_air": "standalone",
+    "HeliaAotBuild": "select",
+    "build": "select",
     "HeliaAotBackend": "backend",
     "HeliaAotPartitioner": "partitioner",
 }
