@@ -39,13 +39,14 @@ MANIFEST_FORMAT = 1
 
 
 class NotFullyDelegableError(ValueError):
-    """The model has operators heliaAOT cannot compile; `rejected` maps each node to the reason."""
+    """heliaAOT cannot compile the whole model; `rejected` maps each node it refuses (an operator, or an input or
+    output it cannot take as an int8 tensor) to the reason."""
 
     def __init__(self, rejected: dict[str, str]):
         self.rejected = dict(rejected)
         lines = "\n".join(f"  {name}: {reason}" for name, reason in self.rejected.items())
         super().__init__(
-            f"{len(self.rejected)} operator(s) cannot be compiled by heliaAOT, so the model needs ExecuTorch "
+            f"heliaAOT cannot compile {len(self.rejected)} node(s) of the model, so it needs ExecuTorch "
             f"(export(..., helia_aot=HeliaAotOptions(...)) delegates the rest):\n{lines}"
         )
 
@@ -178,9 +179,13 @@ def program_to_air(
     To convert the AIR with heliaAOT (codegen.convert_air), save the quantized program and set the
     configuration's `model.path` to that file: the plan names the model by it.
     """
-    ep = _edge_program(model, example_inputs, "ns", calibration_samples)
+    return _air_program(_edge_program(model, example_inputs, "ns", calibration_samples), name)
+
+
+def _air_program(edge_program, name: str) -> AirProgram:
+    """program_to_air() of an edge program; import_program() only reads it."""
     try:
-        imported = import_program(ep, name=name)
+        imported = import_program(edge_program, name=name)
     except UnsupportedProgramError as exc:
         if not exc.rejected:
             # Not an operator heliaAOT lacks: the program itself cannot be imported (traced without its
@@ -211,12 +216,23 @@ def compile_model(
     The file is reproducible (see codegen.save_program), so compiling the same quantized model again gives the
     same name.
     """
-    from .codegen import save_program
+    check_module_name(name)
+    quantized = _quantized_program(model, example_inputs, "ns", calibration_samples)
+    return _compile_quantized(quantized, _edge_program(quantized, None, "ns", None), options, name)
 
+
+def check_module_name(name: Optional[str]) -> None:
+    """Raise ValueError unless `name` (a module name; None takes the default) is a C identifier."""
     if name is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
         raise ValueError(f"module name {name!r} is not a C identifier")
-    quantized = _quantized_program(model, example_inputs, "ns", calibration_samples)
-    program = program_to_air(quantized, name=name or "model")  # refuses a model it does not cover, writing nothing
+
+
+def _compile_quantized(quantized, edge_program, options: HeliaAotOptions, name: Optional[str]) -> CompiledModel:
+    """compile_model() of a quantized program whose edge program the caller already has (build() lowers a
+    model to the edge dialect once, for either path)."""
+    from .codegen import save_program
+
+    program = _air_program(edge_program, name or "model")  # refuses a model it does not cover, writing nothing
     source = save_program(quantized, options)  # the whole program: partition 0 of its file
     name = name or module_name_for(source, options.module_prefix)
     module_dir = generate_module(program.air, options, name, source, executorch_registration=False)

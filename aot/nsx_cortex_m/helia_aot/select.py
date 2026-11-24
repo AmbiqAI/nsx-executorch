@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from .codegen import HeliaAotOptions
-from .standalone import CompiledModel, NotFullyDelegableError, _quantized_program, compile_model
+from .standalone import CompiledModel, NotFullyDelegableError, _compile_quantized, _quantized_program, check_module_name
 
 if TYPE_CHECKING:
     import torch
@@ -36,15 +36,14 @@ class HeliaAotBuild:
 
     mode is the path taken, "module" or "delegate". A module build has `compiled` (the NSX module and its
     int8 I/O contract); a delegate build has `export_result` (write it with write_pte()). `rejected` names the
-    operators that kept an automatic build off the module path, and is empty otherwise; `module_error` is
-    heliaAOT's error when it covers every operator but could not compile the model as one module.
+    nodes (operators, or inputs and outputs) that kept an automatic build off the module path, and is empty
+    otherwise.
     """
 
     mode: str
     compiled: Optional[CompiledModel] = None
     export_result: Optional["ExportResult"] = None
     rejected: dict[str, str] = field(default_factory=dict)
-    module_error: str = ""
 
 
 def build(
@@ -60,45 +59,37 @@ def build(
 ) -> HeliaAotBuild:
     """Compile `model` with heliaAOT, as a plain module when it can and through ExecuTorch otherwise.
 
-    mode="auto" (the default) uses compile_model() when heliaAOT covers every operator and falls back to
-    export(..., helia_aot=options) when it does not; "module" and "delegate" force one path. A float model is
-    quantized once (ns quantizer, `calibration_samples`), so both paths see the same program. `name` names the
-    plain module; `int8_io` applies to the delegate's PTE (a plain module's boundary is always int8).
+    mode="auto" (the default) uses compile_model() when heliaAOT covers the whole model, inputs and outputs
+    included, and falls back to export(..., helia_aot=options) when it does not; "module" and "delegate" force
+    one path. A float model is quantized once (ns quantizer, `calibration_samples`) and lowered to the edge
+    dialect once, so both paths see the same program. `name` names the plain module; `int8_io` applies to the
+    delegate's PTE (a plain module's boundary is always int8).
 
-    In "auto", a model heliaAOT covers but cannot compile as one module (its HeliaAotError is kept in
-    `module_error`) is also tried as a delegate.
-
-    Raises NotFullyDelegableError when mode="module" and the model has operators heliaAOT cannot compile, and
-    heliaAOT's own error when it cannot compile what the chosen path gives it.
+    Raises NotFullyDelegableError when mode="module" and heliaAOT cannot compile the whole model, ValueError
+    when `name` is not a C identifier, and heliaAOT's own error when it cannot compile what the chosen path gives
+    it. A model heliaAOT covers but cannot compile as one module (it does not fit the platform's memory, say)
+    raises that error in "auto" too: as a delegate it would be one partition, the same model.
     """
-    from helia_aot.errors import HeliaAotError, UnsupportedProgramError
+    from executorch.exir import to_edge
 
-    from ..export import export
+    from ..export import _lower_edge, _stock_edge_compile_config
 
     if mode not in MODES:
         raise ValueError(f"mode must be one of {', '.join(MODES)}; got {mode!r}")
+    check_module_name(name)
     program = _quantized_program(model, example_inputs, "ns", calibration_samples)
+    edge_manager = to_edge(program, compile_config=_stock_edge_compile_config())
 
     rejected: dict[str, str] = {}
-    module_error = ""
     if mode != DELEGATE:
         try:
-            compiled = compile_model(program, example_inputs, options, name=name)
+            compiled = _compile_quantized(program, edge_manager.exported_program(), options, name)
         except NotFullyDelegableError as exc:
             if mode == MODULE:
                 raise
             rejected = exc.rejected
-        except UnsupportedProgramError:
-            raise  # the program cannot be imported at all: the delegate would refuse it too
-        except HeliaAotError as exc:
-            # heliaAOT covers every operator but could not compile the whole model (it does not fit the
-            # platform's memory, say). Its partitions may still compile, so an automatic build tries them.
-            if mode == MODULE:
-                raise
-            module_error = str(exc)
         else:
             return HeliaAotBuild(mode=MODULE, compiled=compiled)
 
-    result = export(program, example_inputs, kernel_provider="ns", target_config=target_config, int8_io=int8_io,
-                    helia_aot=options)
-    return HeliaAotBuild(mode=DELEGATE, export_result=result, rejected=rejected, module_error=module_error)
+    result = _lower_edge(program, edge_manager, "ns", target_config, int8_io, options)
+    return HeliaAotBuild(mode=DELEGATE, export_result=result, rejected=rejected)

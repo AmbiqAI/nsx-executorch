@@ -103,16 +103,28 @@ def _calibration(spec: str, example: tuple) -> list[tuple]:
 def _helia_aot_unusable() -> "str | None":
     """Why heliaAOT cannot compile PyTorch models here, or None when it can.
 
-    helia-torch converts through heliaAOT's PT2E front end (helia_aot.converters.pt2e), which helia-aot has from
-    1.5: an older heliaAOT is installed but cannot be used.
+    helia-torch converts through heliaAOT's PT2E front end (helia_aot.converters.pt2e), which no heliaAOT
+    release has yet (AmbiqAI/helia-aot#984): a heliaAOT without it is installed but cannot be used.
     """
     import importlib.util
 
     if importlib.util.find_spec("helia_aot") is None:
         return "heliaAOT is not installed"
     if importlib.util.find_spec("helia_aot.converters.pt2e") is None:
-        return "the installed heliaAOT has no PyTorch front end (it needs helia-aot >= 1.5)"
+        return (
+            "the installed heliaAOT has no PyTorch front end, which no heliaAOT release has yet "
+            "(install heliaAOT from AmbiqAI/helia-aot#984)"
+        )
     return None
+
+
+def _module_name(value: str) -> str:
+    """--name: a plain heliaAOT module's name, which must be a C identifier."""
+    import re
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not a C identifier")
+    return value
 
 
 def _helia_aot_mode(args: argparse.Namespace) -> str:
@@ -130,13 +142,12 @@ def _helia_aot_mode(args: argparse.Namespace) -> str:
     if unusable is not None:
         if mode == "auto":
             print(
-                f"note: {unusable}, so the model is lowered to the "
-                "cortex_m kernels only (pip install 'helia-torch[helia-aot]' to use it).",
+                f"note: {unusable}, so the model is lowered to the cortex_m kernels only.",
                 file=sys.stderr,
             )
             return "off"
         raise SystemExit(
-            f"--helia-aot {mode} needs heliaAOT, and {unusable}: pip install 'helia-torch[helia-aot]'."
+            f"--helia-aot {mode} needs heliaAOT, and {unusable}."
         )
     return mode
 
@@ -157,8 +168,9 @@ def _write_pte(result, output: Path, provider: str) -> None:
         )
 
 
-def _compile_with_helia_aot(args, exported, example, calibration, mode: str, output: Path) -> "int | None":
-    """Compile with heliaAOT and return the exit code, or None when --helia-aot auto should lower without it."""
+def _compile_with_helia_aot(args, quantized, example, mode: str, output: Path) -> "int | None":
+    """Compile the quantized program with heliaAOT and return the exit code, or None when --helia-aot auto
+    should lower it without heliaAOT."""
     from helia_aot.errors import HeliaAotError
 
     from .helia_aot import HeliaAotOptions, NotFullyDelegableError, build
@@ -167,15 +179,7 @@ def _compile_with_helia_aot(args, exported, example, calibration, mode: str, out
     if args.platform is not None:
         options.platform = args.platform
     try:
-        built = build(
-            exported,
-            example,
-            options,
-            mode=mode,
-            name=args.name,
-            calibration_samples=calibration,
-            int8_io=args.int8_io,
-        )
+        built = build(quantized, example, options, mode=mode, name=args.name, int8_io=args.int8_io)
     except NotFullyDelegableError as exc:
         raise SystemExit(
             f"{args.model}: --helia-aot module needs a model heliaAOT fully covers.\n{exc}\n"
@@ -203,15 +207,12 @@ def _compile_with_helia_aot(args, exported, example, calibration, mode: str, out
             print("note: --int8-io has no effect on a module, whose I/O is always int8.", file=sys.stderr)
         return 0
 
-    if built.module_error:
-        print(
-            "heliaAOT covers every operator but could not compile the model as one module, so the model is a "
-            f"PTE that delegates to heliaAOT:\n  {built.module_error}",
-            file=sys.stderr,
-        )
+    if args.name is not None:
+        print("note: --name names a plain heliaAOT module; the delegate's modules keep their own names.",
+              file=sys.stderr)
     if built.rejected:
         print(
-            f"heliaAOT does not cover {len(built.rejected)} operator(s), so the model is a PTE "
+            f"heliaAOT does not cover {len(built.rejected)} node(s) of the model, so the model is a PTE "
             "that delegates the rest to heliaAOT:",
             file=sys.stderr,
         )
@@ -223,7 +224,7 @@ def _compile_with_helia_aot(args, exported, example, calibration, mode: str, out
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    from . import export, is_pt2e_quantized
+    from . import export, is_pt2e_quantized, quantize
 
     mode = _helia_aot_mode(args)
     exported, example = _load_pt2(args.model)
@@ -238,7 +239,11 @@ def _cmd_compile(args: argparse.Namespace) -> int:
         calibration = _calibration(args.calibrate or "random:8", example)
     output = args.output or args.model.with_suffix(".pte")
     if mode != "off":
-        code = _compile_with_helia_aot(args, exported, example, calibration, mode, output)
+        # Quantized once, for heliaAOT and for the cortex_m-only fallback alike.
+        if calibration is not None:
+            exported = quantize(exported, example, kernel_provider=args.provider, calibration_samples=calibration)
+            calibration = None
+        code = _compile_with_helia_aot(args, exported, example, mode, output)
         if code is not None:
             return code
     result = export(
@@ -336,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     compile_parser.add_argument(
         "--name",
+        type=_module_name,
         default=None,
         help="C name of a plain heliaAOT module (default: haot_<digest>_0, from the saved program's SHA-256)",
     )

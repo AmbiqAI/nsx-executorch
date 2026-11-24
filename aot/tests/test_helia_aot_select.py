@@ -6,13 +6,15 @@
 # (no ExecuTorch runtime), any other model a PTE delegating what heliaAOT covers; module / delegate / off
 # override that, and forcing a module on a model heliaAOT does not fully cover is an error.
 
+import importlib
 import importlib.util
 import json
 
 import pytest
 import torch
 
-# helia-torch converts through heliaAOT's PT2E front end (helia-aot >= 1.5); an older heliaAOT skips these too.
+# helia-torch converts through heliaAOT's PT2E front end, which no heliaAOT release has yet
+# (AmbiqAI/helia-aot#984); without it these tests skip.
 pytest.importorskip("helia_aot.converters.pt2e")
 
 from nsx_cortex_m import quantize  # noqa: E402
@@ -183,7 +185,7 @@ def test_cli_without_helia_aot_installed(covered_pt2, tmp_path, monkeypatch, cap
 
 
 def test_cli_with_a_helia_aot_that_has_no_pytorch_front_end(covered_pt2, tmp_path, monkeypatch, capsys):
-    # helia-aot before 1.5 is importable but has no helia_aot.converters.pt2e: auto must fall back to the cortex_m
+    # A released heliaAOT is importable but has no helia_aot.converters.pt2e: auto must fall back to the cortex_m
     # kernels as it does without heliaAOT, not fail on the import.
     real = importlib.util.find_spec
     monkeypatch.setattr(
@@ -192,7 +194,7 @@ def test_cli_with_a_helia_aot_that_has_no_pytorch_front_end(covered_pt2, tmp_pat
     assert _compile(covered_pt2, tmp_path) == 0
     assert not load_sidecar(tmp_path / "out" / "model.pte")["requires_helia_aot"]
     assert "no PyTorch front end" in capsys.readouterr().err
-    with pytest.raises(SystemExit, match="helia-aot >= 1.5"):
+    with pytest.raises(SystemExit, match="no PyTorch front end"):
         _compile(covered_pt2, tmp_path, "--helia-aot", "delegate")
 
 
@@ -203,37 +205,36 @@ def test_cli_prints_where_the_io_contract_is(covered_pt2, tmp_path, capsys):
     assert contract.is_file() and str(contract) in printed.replace("\n", "")
 
 
-def _fail_module_build(monkeypatch, fail_delegate=False):
-    """Make heliaAOT refuse the whole model as one module (and, optionally, its partitions too)."""
+def _fail_module_build(monkeypatch):
+    """Make heliaAOT refuse to generate any module (the whole model as one, or a delegate's partition)."""
     from helia_aot.errors import InvalidConfigError
 
-    from nsx_cortex_m.helia_aot import codegen, standalone
+    from nsx_cortex_m.helia_aot import backend, standalone
 
-    real = codegen.generate_module
+    calls = []
 
-    def generate(air, options, name, source, **kwargs):
-        if fail_delegate or kwargs.get("executorch_registration", True) is False:
-            raise InvalidConfigError("the model does not fit the platform")
-        return real(air, options, name, source, **kwargs)
+    def generate(*args, **kwargs):
+        calls.append(kwargs.get("executorch_registration", True))
+        raise InvalidConfigError("the model does not fit the platform")
 
     monkeypatch.setattr(standalone, "generate_module", generate)
-    monkeypatch.setattr(codegen, "generate_module", generate)
-    from nsx_cortex_m.helia_aot import backend
-
     monkeypatch.setattr(backend, "generate_module", generate)
+    return calls
 
 
-def test_auto_delegates_a_covered_model_helia_aot_cannot_compile_whole(tmp_path, monkeypatch):
-    _fail_module_build(monkeypatch)
-    built = build(_quantized(ConvRelu()), _inputs(), _options(tmp_path))
-    assert built.mode == "delegate" and "does not fit the platform" in built.module_error
-    with pytest.raises(Exception, match="does not fit the platform"):
-        build(_quantized(ConvRelu()), _inputs(), _options(tmp_path / "forced"), mode="module")
+def test_auto_reports_why_helia_aot_cannot_compile_a_covered_model(tmp_path, monkeypatch):
+    # As a delegate, a covered model is one partition, the same model: auto does not convert it again.
+    from helia_aot.errors import InvalidConfigError
+
+    calls = _fail_module_build(monkeypatch)
+    with pytest.raises(InvalidConfigError, match="does not fit the platform"):
+        build(_quantized(ConvRelu()), _inputs(), _options(tmp_path))
+    assert calls == [False]
 
 
 def test_cli_auto_lowers_without_helia_aot_when_it_cannot_compile_the_model(covered_pt2, tmp_path, monkeypatch, capsys):
     # auto must not do worse than no heliaAOT at all; the explicit modes report the failure.
-    _fail_module_build(monkeypatch, fail_delegate=True)
+    _fail_module_build(monkeypatch)
     assert _compile(covered_pt2, tmp_path) == 0
     assert not load_sidecar(tmp_path / "out" / "model.pte")["requires_helia_aot"]
     assert "does not fit the platform" in capsys.readouterr().err
@@ -241,19 +242,61 @@ def test_cli_auto_lowers_without_helia_aot_when_it_cannot_compile_the_model(cove
         _compile(covered_pt2, tmp_path, "--helia-aot", "delegate")
 
 
-def test_a_program_that_cannot_be_imported_is_not_reported_as_uncovered_operators(tmp_path, monkeypatch):
-    # heliaAOT refuses a program traced without its weights with no operator to name: that is its own error,
-    # not "0 operators cannot be compiled", and no reason to try the delegate.
+def test_auto_lowers_a_model_to_the_edge_dialect_once(tmp_path, monkeypatch):
+    # The coverage check and the delegate share one edge program.
+    import executorch.exir
+
+    export_module = importlib.import_module("nsx_cortex_m.export")
+
+    real, calls = executorch.exir.to_edge, []
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(executorch.exir, "to_edge", counting)
+    monkeypatch.setattr(export_module, "to_edge", counting)
+    built = build(_quantized(ConvSigmoidConv()), _inputs(), _options(tmp_path))
+    assert built.mode == "delegate" and len(calls) == 1
+
+
+class UnusedInput(torch.nn.Module):
+    """Every operator is covered, but a heliaAOT module has no input the model does not read."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(4, 8, 3, padding=1)
+
+    def forward(self, x, unused):
+        return torch.relu(self.conv(x))
+
+
+def test_auto_delegates_a_model_helia_aot_refuses_only_at_its_boundary(tmp_path):
+    inputs = _inputs() + _inputs()
+    quantized = quantize(UnusedInput().eval(), inputs, kernel_provider="ns", calibration_samples=[inputs])
+    built = build(quantized, inputs, _options(tmp_path))
+    assert built.mode == "delegate"
+    assert built.rejected == {"unused": "input unused is not used; a heliaAOT module has no such input"}
+    assert built.export_result.edge_ops  # the convolution is delegated, the input stays the PTE's
+
+
+def test_a_module_name_that_is_not_a_c_identifier_is_refused_before_anything_runs(tmp_path, covered_pt2, capsys):
+    with pytest.raises(ValueError, match="not a C identifier"):
+        build(_quantized(ConvRelu()), _inputs(), _options(tmp_path), name="kws-v1")
+    with pytest.raises(SystemExit):
+        _compile(covered_pt2, tmp_path, "--name", "kws-v1")
+    assert "not a C identifier" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_program_traced_without_its_weights_is_not_reported_as_uncovered_operators(tmp_path):
+    # heliaAOT refuses a program with fake weights with no node to name: that is its own error, not
+    # "0 nodes cannot be compiled", and no reason to try the delegate.
+    from executorch.exir.program._fake_program import get_fake_program
     from helia_aot.errors import UnsupportedProgramError
 
-    from nsx_cortex_m.helia_aot import standalone
-
-    def refuse(program, **_):
-        raise UnsupportedProgramError("The program holds no data for 2 parameter(s)", hint="Export with weights.")
-
-    monkeypatch.setattr(standalone, "import_program", refuse)
     with pytest.raises(UnsupportedProgramError, match="holds no data"):
-        build(_quantized(ConvRelu()), _inputs(), _options(tmp_path))
+        build(get_fake_program(_quantized(ConvRelu())), _inputs(), _options(tmp_path))
     assert not any(tmp_path.iterdir())
 
 
