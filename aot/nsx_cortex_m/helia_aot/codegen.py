@@ -16,10 +16,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 DEFAULT_PLATFORM = "apollo510_evb"
@@ -80,19 +80,19 @@ class HeliaAotOptions:
 
     output_dir: directory that receives one NSX module directory per delegated partition (required).
     platform: heliaAOT platform name (``helia-aot platforms list``).
-    capabilities: optional platform capability override, e.g. ["MCU"] for a plain-C build that runs on a host.
     module_prefix: module names are ``<prefix>_<program digest>_<partition>`` (see ``module_name_for``), and the
         saved program ``<prefix>_<program digest>.pt2``.
     debug_program: also save the program with its debug metadata, as ``<prefix>_<program digest>.debug.pt2``
         (see ``save_program``).
+    extra: more heliaAOT settings, as ``ConvertArgs(**extra)`` takes them; the model, module and platform name
+        set here take precedence. Values must be JSON: they travel to the backend in a compile spec.
     """
 
     output_dir: Path
     platform: str = DEFAULT_PLATFORM
-    capabilities: Optional[list[str]] = None
     module_prefix: str = "haot"
     debug_program: bool = False
-    extra: dict = field(default_factory=dict)  # deep-merged into heliaAOT's ConvertArgs
+    extra: dict = field(default_factory=dict)
 
 
 #: Node metadata that records how a program was traced, not what it computes. PyTorch writes it differently on
@@ -171,8 +171,8 @@ def compile_specs_for(options: HeliaAotOptions, source=None, partition: int = 0)
             CompileSpec("source_path", str(source.path).encode()),
             CompileSpec("partition", str(partition).encode()),
         ]
-    if options.capabilities is not None:
-        specs.append(CompileSpec("capabilities", ",".join(options.capabilities).encode()))
+    if options.extra:
+        specs.append(CompileSpec("extra", json.dumps(options.extra, sort_keys=True).encode()))
     return specs
 
 
@@ -180,12 +180,11 @@ def options_from_specs(specs) -> HeliaAotOptions:
     values = {s.key: s.value.decode() for s in specs}
     if "output_dir" not in values:
         raise ValueError("HeliaAotBackend needs an output_dir compile spec (where to write the modules)")
-    caps = values.get("capabilities")
     return HeliaAotOptions(
         output_dir=Path(values["output_dir"]),
         platform=values.get("platform", DEFAULT_PLATFORM),
-        capabilities=caps.split(",") if caps else None,
         module_prefix=values.get("module_prefix", "haot"),
+        extra=json.loads(values.get("extra", "{}")),
     )
 
 
@@ -238,10 +237,6 @@ def generate_module(air_model, options: HeliaAotOptions, name: str, source: Prog
     cfg.module.prefix = name
     cfg.module.type = ModuleType.NSX
     cfg.platform.name = options.platform
-    if options.capabilities is not None:
-        from helia_aot.platforms.defines import SocCapability
-
-        cfg.platform.capabilities = [SocCapability(c) for c in options.capabilities]
     present = {str(getattr(op.op_type, "name", op.op_type)) for op in air_model.operators}
     rules = [r for r in SEMANTIC_OPERATOR_RULES if r["type"] in present]
     cfg.operators = [OperatorRuleset(**rule) for rule in rules] + list(cfg.operators or [])

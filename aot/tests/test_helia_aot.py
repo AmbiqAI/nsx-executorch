@@ -7,9 +7,10 @@
 # kernels.
 #
 # The bit-exact tests export each model twice from one quantized program --
-# delegated to heliaAOT (generated for a plain-C target, capabilities MCU) and
-# not delegated -- then compile the generated module with ns-cmsis-nn on the
-# host and compare its int8 outputs with the reference kernels' byte for byte.
+# delegated to heliaAOT (generated for apollo4p_evb) and not delegated -- then
+# compile the generated module with ns-cmsis-nn on the host, where its kernels
+# take their portable C paths, and compare its int8 outputs with the reference
+# kernels' byte for byte.
 # CMSIS-NN's portable and MVE kernels are bit-exact by design; the on-device
 # check of the MVE build is firmware-side.
 #
@@ -144,8 +145,8 @@ def _quantized(model, inputs, seed=0):
     return quantize(model.eval(), inputs, kernel_provider="ns", calibration_samples=calibration)
 
 
-def _delegated(quantized, inputs, out_dir: Path, capabilities=("MCU",), platform="apollo4p_evb"):
-    opts = HeliaAotOptions(output_dir=out_dir, platform=platform, capabilities=list(capabilities))
+def _delegated(quantized, inputs, out_dir: Path, platform="apollo4p_evb"):
+    opts = HeliaAotOptions(output_dir=out_dir, platform=platform)
     return export(quantized, inputs, kernel_provider="ns", target_config=TARGET, helia_aot=opts)
 
 
@@ -282,6 +283,18 @@ def test_int8_io_hands_the_delegate_the_programs_own_int8_boundary(tmp_path):
     assert len(result.io_qparams["inputs"]) == 1 and len(result.io_qparams["outputs"]) == 1
 
 
+def test_extra_settings_reach_heliaaot(tmp_path):
+    # The backend rebuilds its options from the compile specs, so extra must travel in them.
+    from nsx_cortex_m.helia_aot.codegen import compile_specs_for, options_from_specs
+
+    opts = HeliaAotOptions(output_dir=tmp_path, extra={"module": {"schedule": "static"}})
+    assert options_from_specs(compile_specs_for(opts)).extra == {"module": {"schedule": "static"}}
+    model, inputs = CASES["conv1x1"]
+    with pytest.raises(ValueError, match="unknown key 'no_such_setting'"):
+        export(_quantized(model, inputs), inputs, kernel_provider="ns", target_config=TARGET,
+               helia_aot=HeliaAotOptions(output_dir=tmp_path, extra={"no_such_setting": 1}))
+
+
 def test_unsupported_ops_stay_in_executorch(tmp_path):
     # hardtanh(-2, 3) is not an AIR ReLU variant: the convolutions around it are delegated, it is not.
     model = Fn(lambda m, x: m["b"](F.hardtanh(m["a"](x), -2.0, 3.0)),
@@ -339,7 +352,7 @@ def _seeded_conv(seed):
 
 def _export_into(directory, seed, **options):
     model, inputs = _seeded_conv(seed)
-    opts = HeliaAotOptions(output_dir=directory, platform="apollo4p_evb", capabilities=["MCU"], **options)
+    opts = HeliaAotOptions(output_dir=directory, platform="apollo4p_evb", **options)
     result = export(_quantized(model, inputs), inputs, kernel_provider="ns", target_config=TARGET, helia_aot=opts)
     (saved,) = [p for p in directory.glob("haot_*.pt2") if not p.name.endswith(".debug.pt2")]
     return saved, sorted(blob.module for blob in _blobs(result))
