@@ -60,16 +60,20 @@ class HeliaAotBackend(BackendDetails):
         imported = import_program(edge_program, name="partition")
         air = imported.model
         name = module_name_for(source, options.module_prefix)
-        module_dir = generate_module(air, options, name, source)
 
+        # The importer's boundary is in signature order, which is also the order ExecuTorch passes arguments in.
+        # Checked before heliaAOT runs, so a partition that cannot be a delegate leaves no module behind.
         graph = edge_program.graph_module.graph
-        user_inputs = {s.arg.name for s in edge_program.graph_signature.input_specs if s.kind.name == "USER_INPUT"}
-        placeholders = [n for n in graph.nodes if n.op == "placeholder" and n.name in user_inputs]
+        by_name = {n.name: n for n in graph.nodes}
+        placeholders = [
+            by_name[s.arg.name] for s in edge_program.graph_signature.input_specs if s.kind.name == "USER_INPUT"
+        ]
         outputs = list(next(n for n in graph.nodes if n.op == "output").args[0])
         blob = DelegateBlob(
             module=name,
             inputs=tuple(_contract(p, t) for p, t in zip(placeholders, imported.inputs, strict=True)),
             outputs=tuple(_contract(o, t) for o, t in zip(outputs, imported.outputs, strict=True)),
         )
+        module_dir = generate_module(air, options, name, source)
         logger.info("helia-aot: partition -> %s (%d AIR operators) at %s", name, len(air.operators), module_dir)
         return PreprocessResult(processed_bytes=blob.pack())

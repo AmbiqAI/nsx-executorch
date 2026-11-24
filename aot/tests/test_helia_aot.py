@@ -207,6 +207,7 @@ def test_a_partition_with_a_float_boundary_is_not_a_delegate(tmp_path):
     specs = compile_specs_for(HeliaAotOptions(output_dir=tmp_path), ProgramSource(saved))
     with pytest.raises(ValueError, match="is torch.float32, not int8"):
         HeliaAotBackend.preprocess(edge, specs)
+    assert [p.name for p in tmp_path.iterdir()] == ["model.pt2"]  # refused before heliaAOT wrote a module
 
 
 def test_the_registry_counts_the_modules_it_turned_away(tmp_path):
