@@ -268,6 +268,19 @@ def test_kws_is_fully_delegated(tmp_path):
     assert "target_sources(" in (module / "CMakeLists.txt").read_text()
 
 
+def test_int8_io_hands_the_delegate_the_programs_own_int8_boundary(tmp_path):
+    # int8_io rewrites the boundary before partitioning; the program must still verify in to_backend().
+    model, inputs = CASES["kws_ds_cnn"]
+    opts = HeliaAotOptions(output_dir=tmp_path, platform="apollo4p_evb")
+    result = export(_quantized(model, inputs), inputs, kernel_provider="ns", target_config=TARGET,
+                    int8_io=True, helia_aot=opts)
+    ops = build_manifest(result, result.executorch_program.buffer, "ns")["operators"]
+    assert ops == {"cortex_m": [], "cortex_m_ns": [], "portable": []}
+    (blob,) = _blobs(result)
+    assert blob.inputs == (TensorContract(1, 490),) and blob.outputs == (TensorContract(1, 12),)
+    assert len(result.io_qparams["inputs"]) == 1 and len(result.io_qparams["outputs"]) == 1
+
+
 def test_unsupported_ops_stay_in_executorch(tmp_path):
     # hardtanh(-2, 3) is not an AIR ReLU variant: the convolutions around it are delegated, it is not.
     model = Fn(lambda m, x: m["b"](F.hardtanh(m["a"](x), -2.0, 3.0)),

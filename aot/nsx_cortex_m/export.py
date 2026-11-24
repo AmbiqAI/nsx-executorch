@@ -273,6 +273,16 @@ def export(
         )
         quantize_inputs.call(io_program.graph_module)
         quantize_outputs.call(io_program.graph_module)
+        # The passes rewrite the graph but not its signature, whose boundary
+        # names are now stale. The NS pass manager rebuilds the program anyway;
+        # to_backend() verifies it first, so rebuild it here for both paths.
+        from executorch.exir.program._program import (
+            _update_exported_program_graph_module,
+        )
+
+        edge_manager._edge_programs["forward"] = _update_exported_program_graph_module(
+            io_program, io_program.graph_module
+        )
         io_qparams = {
             "inputs": quantize_inputs.quant_args,
             "outputs": quantize_outputs.dequant_args,
