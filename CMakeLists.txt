@@ -403,14 +403,16 @@ if(_nsx_executorch_cmsis_root)
   set(CMSIS_PATH "${_nsx_executorch_cmsis_root}" CACHE PATH "" FORCE)
 endif()
 # Static kernel-registry capacity (12 bytes of .bss per slot on 32-bit).
-# Registrations at static-init time: 25 prim ops + 16 cortex_m ops (+5
-# cortex_m_ns ops), or the length of NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST
-# / NSX_EXECUTORCH_NS_SELECT_OPS_LIST when set, plus one per entry in
-# NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST. Overflow aborts before main() —
-# silently, since logging is off and the minimal PAL traps — so keep visible
-# headroom: 64 leaves 23 portable slots, 96 leaves 50. The larger table is for
-# the cortex_m_ns operators when they are built, not merely switched on (NONE
-# builds none).
+# Registrations at static-init time: the prim ops (25 at the pinned ExecuTorch)
+# + 16 cortex_m ops (+5 cortex_m_ns ops), or the length of
+# NSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST / NSX_EXECUTORCH_NS_SELECT_OPS_LIST
+# when set, plus one per entry in NSX_EXECUTORCH_PORTABLE_SELECT_OPS_LIST.
+# Overflow aborts before main() — silently, since logging is off and the
+# minimal PAL traps — so keep visible headroom: 64 leaves 23 portable slots,
+# 96 leaves 50. The larger table is for the cortex_m_ns operators when they
+# are built, not merely switched on (NONE builds none). The count is checked
+# twice: estimated at configure time below, and exactly at build time from the
+# generated registration sources (nsx_executorch_kernel_count, further down).
 if(_nsx_executorch_build_ns_ops)
   set(MAX_KERNEL_NUM 96 CACHE STRING "" FORCE)
 else()
@@ -418,9 +420,14 @@ else()
 endif()
 # Overflow otherwise traps at static-init before main() with zero
 # diagnostics, so reject it at configure time. The cortex_m and cortex_m_ns
-# counts are read from the operator schemas; the prim-op count must track the
-# pinned submodule (25: kernels/prim_ops/register_prim_ops.cpp) — recount on
-# an ExecuTorch upgrade.
+# counts are read from the operator schemas and the prim-op count from
+# kernels/prim_ops/register_prim_ops.cpp, so an ExecuTorch upgrade needs no
+# recount here.
+include("${NSX_EXECUTORCH_ROOT}/cmake/nsx_executorch_kernel_count.cmake")
+set(_nsx_executorch_prim_ops_source
+    "${NSX_EXECUTORCH_SOURCE_ROOT}/kernels/prim_ops/register_prim_ops.cpp")
+nsx_executorch_count_kernel_entries(_nsx_executorch_prim_ops_count
+  "${_nsx_executorch_prim_ops_source}")
 _nsx_executorch_schema_ops(_nsx_executorch_cortex_m_known
   "${NSX_EXECUTORCH_SOURCE_ROOT}/backends/cortex_m/ops/operators.yaml")
 list(LENGTH _nsx_executorch_cortex_m_known _nsx_executorch_cortex_m_ops_count)
@@ -442,7 +449,7 @@ elseif(NSX_EXECUTORCH_NS_SELECT_OPS_LIST)
     _nsx_executorch_ns_root_ops _nsx_executorch_ns_ops_count)
 endif()
 math(EXPR _nsx_executorch_registered_kernels
-     "25 + ${_nsx_executorch_cortex_m_ops_count}")
+     "${_nsx_executorch_prim_ops_count} + ${_nsx_executorch_cortex_m_ops_count}")
 if(_nsx_executorch_build_ns_ops)
   math(EXPR _nsx_executorch_registered_kernels
        "${_nsx_executorch_registered_kernels} + ${_nsx_executorch_ns_ops_count}")
@@ -824,6 +831,48 @@ endif()
 if(_nsx_executorch_build_portable_ops)
   target_link_libraries(nsx_executorch PRIVATE executorch_kernels)
 endif()
+
+# The libraries that register kernels at static-init time, as ExecuTorch
+# codegen generates them; the prim ops come with `executorch`. Also exposed as
+# a global property, which tests/real-provider links against.
+set(_nsx_executorch_registration_libs "")
+if(_nsx_executorch_cortex_m_ops_lib)
+  list(GET _nsx_executorch_cortex_m_ops_lib 0 _nsx_executorch_cortex_m_registration)
+  list(APPEND _nsx_executorch_registration_libs "${_nsx_executorch_cortex_m_registration}")
+endif()
+if(_nsx_executorch_build_ns_ops)
+  list(APPEND _nsx_executorch_registration_libs cortex_m_ns_ops_lib)
+endif()
+if(_nsx_executorch_build_portable_ops)
+  list(APPEND _nsx_executorch_registration_libs executorch_selected_kernels)
+endif()
+set_property(GLOBAL PROPERTY NSX_EXECUTORCH_REGISTRATION_LIBS "${_nsx_executorch_registration_libs}")
+
+# The exact kernel count, from the registration sources codegen wrote: the
+# configure-time figure above is an estimate from the schemas and lists, and a
+# miscount would trap silently before main(). nsx_executorch is not built
+# until the count fits MAX_KERNEL_NUM.
+set(_nsx_executorch_registration_sources "")
+foreach(_nsx_executorch_lib IN LISTS _nsx_executorch_registration_libs)
+  list(APPEND _nsx_executorch_registration_sources
+    "$<TARGET_PROPERTY:${_nsx_executorch_lib},BINARY_DIR>/${_nsx_executorch_lib}/RegisterCodegenUnboxedKernelsEverything.cpp")
+endforeach()
+set(_nsx_executorch_kernel_count_stamp "${CMAKE_CURRENT_BINARY_DIR}/nsx_executorch_kernel_count.txt")
+add_custom_command(
+  OUTPUT "${_nsx_executorch_kernel_count_stamp}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DREGISTRATION_SOURCES=${_nsx_executorch_registration_sources}"
+    "-DPRIM_OPS_SOURCE=${_nsx_executorch_prim_ops_source}"
+    "-DMAX_KERNEL_NUM=${MAX_KERNEL_NUM}"
+    "-DSTAMP=${_nsx_executorch_kernel_count_stamp}"
+    -P "${NSX_EXECUTORCH_ROOT}/cmake/nsx_executorch_kernel_count.cmake"
+  DEPENDS ${_nsx_executorch_registration_libs}
+    "${_nsx_executorch_prim_ops_source}"
+    "${NSX_EXECUTORCH_ROOT}/cmake/nsx_executorch_kernel_count.cmake"
+  COMMENT "Counting the kernels nsx_executorch registers against MAX_KERNEL_NUM"
+  VERBATIM)
+add_custom_target(nsx_executorch_kernel_count DEPENDS "${_nsx_executorch_kernel_count_stamp}")
+add_dependencies(nsx_executorch nsx_executorch_kernel_count)
 
 # The adapter is created in consumer scope, outside the subtree walk above,
 # and none of its linked nsx:: contracts are required to carry the board ABI
