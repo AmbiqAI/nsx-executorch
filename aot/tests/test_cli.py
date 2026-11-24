@@ -140,3 +140,91 @@ def test_compile_rejects_non_tensor_positional_inputs(tmp_path):
     _torch.export.save(exported, path)
     with pytest.raises(SystemExit, match="non-tensor inputs"):
         _compile(path, tmp_path / "x.pte")
+
+
+# --no-quantize: a float model lowers in its own dtype on ExecuTorch's portable kernels.
+
+
+class FloatModel(torch.nn.Module):
+    """Linear and hardswish, which the int8 edge config keeps whole and which have no portable kernel."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv = torch.nn.Conv2d(2, 4, kernel_size=3, padding=1)
+        self.linear = torch.nn.Linear(4 * 8 * 8, 10)
+
+    def forward(self, x):
+        return torch.softmax(self.linear(torch.nn.functional.hardswish(self.conv(x)).flatten(1)), dim=-1)
+
+
+def _portable_kernels() -> set[str]:
+    """The operators ExecuTorch's portable kernel library implements, from its functions.yaml."""
+    import re
+    from importlib.resources import files
+
+    text = (files("executorch") / "kernels" / "portable" / "functions.yaml").read_text()
+    aten = {f"aten::{name}" for name in re.findall(r"^- op: (\S+)$", text, flags=re.MULTILINE)}
+    # Operators outside aten are listed with their schema and their namespace.
+    return aten | set(re.findall(r"^- func: (\w+::[\w.]+)\(", text, flags=re.MULTILINE))
+
+
+def _float_pt2(tmp_path, dtype):
+    torch.manual_seed(0)
+    model = FloatModel().eval().to(dtype)
+    example = (ramp_tensor(-2, 2, (1, 2, 8, 8)).to(dtype),)
+    path = tmp_path / f"model_{str(dtype).split('.')[-1]}.pt2"
+    torch.export.save(torch.export.export(model, example, strict=True), path)
+    return path, model, example
+
+
+@pytest.mark.parametrize(
+    ("dtype", "scalar_type", "tolerance"),
+    [(torch.float32, "FLOAT", 1e-6), (torch.float16, "HALF", 1e-2), (torch.bfloat16, "BFLOAT16", 5e-2)],
+)
+def test_compile_no_quantize_lowers_a_float_model_on_portable_kernels(tmp_path, dtype, scalar_type, tolerance):
+    from executorch.extension.pybindings.portable_lib import _load_for_executorch_from_buffer
+
+    path, model, example = _float_pt2(tmp_path, dtype)
+    out = tmp_path / "float.pte"
+    assert _compile(path, out, "--no-quantize") == 0
+
+    manifest = load_sidecar(out)
+    assert manifest["operators"]["cortex_m"] == manifest["operators"]["cortex_m_ns"] == []
+    assert manifest["helia_aot_modules"] == []
+    assert [tensor["dtype"] for tensor in manifest["inputs"] + manifest["outputs"]] == [scalar_type] * 2
+    # Every operator must have a portable kernel, or the firmware cannot run the PTE.
+    assert set(manifest["operators"]["portable"]) <= _portable_kernels()
+
+    (output,) = _load_for_executorch_from_buffer(out.read_bytes()).forward(list(example))
+    assert output.dtype == dtype
+    torch.testing.assert_close(output.float(), model(*example).float(), atol=tolerance, rtol=0)
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        (("--calibrate", "random:2"), "--calibrate"),
+        (("--int8-io",), "--int8-io"),
+        (("--helia-aot", "module"), "--helia-aot module"),
+        (("--helia-aot", "delegate"), "--helia-aot delegate"),
+        (("--test-case",), "--test-case"),
+        (("--name", "kws"), "--name"),
+        (("--debug-program",), "--debug-program"),
+    ],
+)
+def test_compile_no_quantize_refuses_what_needs_an_int8_model(float_pt2, tmp_path, flags, named):
+    with pytest.raises(SystemExit, match=f"{named} needs an int8 model"):
+        _compile(float_pt2, tmp_path / "x.pte", "--no-quantize", *flags)
+
+
+def test_compile_no_quantize_lowers_an_int8_model_as_usual(int8_pt2, tmp_path):
+    out = tmp_path / "int8.pte"
+    assert _compile(int8_pt2, out, "--provider", "arm", "--no-quantize") == 0
+    assert load_sidecar(out)["operators"]["cortex_m"]
+
+
+def test_export_without_quantization_refuses_int8_options():
+    from nsx_cortex_m import export
+
+    with pytest.raises(ValueError, match="int8_io: only for an int8 program"):
+        export(ConvReluModel().eval(), _example(), kernel_provider="ns", quantize_model=False, int8_io=True)

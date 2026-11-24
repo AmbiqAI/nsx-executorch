@@ -197,6 +197,7 @@ def export(
     target_config: Optional[CortexMTargetConfig] = None,
     int8_io: bool = False,
     helia_aot: Optional["HeliaAotOptions"] = None,
+    quantize_model: bool = True,
 ) -> ExportResult:
     """Quantize (if needed), lower and serialize `model` for the provider.
 
@@ -224,6 +225,13 @@ def export(
     heliaAOT plan names it by that file and the partition's index. See
     helia_aot/.
 
+    With `quantize_model=False` a float program is not quantized: it lowers
+    in its own floating-point dtype (float32, or float16 / bfloat16 if the
+    model was cast before torch.export) and every operator runs on
+    ExecuTorch's portable kernels. An already-quantized program lowers as
+    usual. `calibration_samples`, `int8_io` and `helia_aot` need an int8
+    program and are rejected for a float one.
+
     Returns an ExportResult with the ExecutorchProgramManager, the edge op
     histogram and the list of NS-candidate aten ops that stayed on the
     portable fallback path (with the matching select-ops list value).
@@ -231,6 +239,22 @@ def export(
     _check_kernel_provider(kernel_provider)
 
     exported = _as_exported_program(model, example_inputs)
+    if not quantize_model and not is_pt2e_quantized(exported):
+        refused = [
+            name
+            for name, given in (
+                ("calibration_samples", calibration_samples is not None),
+                ("int8_io", int8_io),
+                ("helia_aot", helia_aot is not None),
+            )
+            if given
+        ]
+        if refused:
+            raise ValueError(
+                f"{', '.join(refused)}: only for an int8 program, and with "
+                "quantize_model=False this float model stays unquantized"
+            )
+        return _lower_float(exported, kernel_provider)
     if is_pt2e_quantized(exported):
         if calibration_samples is not None:
             raise ValueError(
@@ -248,6 +272,28 @@ def export(
         )
     edge_manager = to_edge(final_export, compile_config=_stock_edge_compile_config())
     return _lower_edge(final_export, edge_manager, kernel_provider, target_config, int8_io, helia_aot)
+
+
+def _lower_float(exported, kernel_provider) -> ExportResult:
+    """export() for a float program that stays unquantized.
+
+    The stock edge config keeps linear, hardswish and hardsigmoid whole for the int8 kernels; ExecuTorch has
+    no portable kernel for them, so a float program takes the default config, which decomposes every operator
+    into the core ATen operators the portable kernels implement. The Cortex-M passes, which lower int8
+    operators to the CMSIS-NN kernels, do not run.
+    """
+    edge_manager = to_edge(exported, compile_config=EdgeCompileConfig())
+    edge_ops = _count_edge_ops(edge_manager.exported_program())
+    edge_module = edge_manager.exported_program().module()
+    return ExportResult(
+        executorch_program=edge_manager.to_executorch(),
+        edge_ops=edge_ops,
+        portable_fallback_ops=sorted(
+            {_EDGE_TO_PORTABLE[name] for name in edge_ops if name in _EDGE_TO_PORTABLE}
+        ),
+        edge_module=edge_module,
+        kernel_provider=kernel_provider,
+    )
 
 
 def _lower_edge(final_export, edge_manager, kernel_provider, target_config, int8_io, helia_aot) -> ExportResult:
