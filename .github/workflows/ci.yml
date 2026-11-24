@@ -179,9 +179,19 @@ jobs:
             -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
             -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
             -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST="cortex_m::quantize_per_tensor.out,cortex_m::dequantize_per_tensor.out,cortex_m::quantized_linear.out" \
-            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST="cortex_m_ns::quantized_mean.out"
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST="cortex_m_ns::quantized_mean.out" \
+            -DNSX_EXECUTORCH_TEST_LINK_CHECK=ON
+          # The link check links the registration libraries whole with the runtime, so
+          # every kernel they name must resolve; building it also runs the exact
+          # kernel count against MAX_KERNEL_NUM.
           cmake --build build/real-ns-select \
-            --target nsx_cortex_m_ops_lib cortex_m_ns_ops_lib --parallel 2
+            --target nsx_cortex_m_ops_lib cortex_m_ns_ops_lib nsx_executorch_link_check --parallel 2
+          linked() {
+            arm-none-eabi-nm -C "$1" | grep -oE 'cortex_m(_ns)?::native::[a-z0-9_]+_out' | LC_ALL=C sort -u | tr '\n' ' '
+          }
+          got="$(linked build/real-ns-select/nsx_executorch_link_check)"
+          want="cortex_m::native::dequantize_per_tensor_out cortex_m::native::quantize_per_tensor_out cortex_m::native::quantized_linear_out cortex_m_ns::native::quantized_mean_out "
+          test "$got" = "$want" || { echo "::error::linked kernels: $got"; exit 1; }
           # The registration libraries must reference exactly the selection.
           registered() {
             arm-none-eabi-nm -C -u "$(find build/real-ns-select -name "lib$1.a" | head -n1)" |
@@ -223,7 +233,12 @@ jobs:
             -DNSX_EXECUTORCH_TEST_NS_ROOT="$GITHUB_WORKSPACE/build/providers/ns-cmsis-nn-7.47" \
             -DNSX_EXECUTORCH_ENABLE_NS_OPS=ON \
             -DNSX_EXECUTORCH_CORTEX_M_SELECT_OPS_LIST=NONE \
-            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=NONE
+            -DNSX_EXECUTORCH_NS_SELECT_OPS_LIST=NONE \
+            -DNSX_EXECUTORCH_TEST_LINK_CHECK=ON
+          # The runtime alone links, with no cortex_m or cortex_m_ns kernel in it.
+          cmake --build build/real-ns-select-none --target nsx_executorch_link_check --parallel 2
+          got="$(linked build/real-ns-select-none/nsx_executorch_link_check)"
+          test -z "$got" || { echo "::error::NONE links kernels: $got"; exit 1; }
           (cd build/real-ns-select-none && cmake --graphviz=deps.dot . > /dev/null)
           python3 - build/real-ns-select-none/deps.dot <<'PY'
           import re, sys

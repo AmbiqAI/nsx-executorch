@@ -101,3 +101,36 @@ else()
 endif()
 
 add_subdirectory("${NSX_EXECUTORCH_TEST_ROOT}" nsx-executorch)
+
+# A firmware that links nsx_executorch also links every kernel its registration
+# libraries name; a selection that names an operator whose kernel is not built
+# fails only then, at the app's link. nsx_executorch itself needs the Ambiq HAL,
+# which this harness does not provide, so link its registration libraries (whole,
+# as their static initializers are) with the ExecuTorch runtime into a bare
+# executable instead. Building it also runs the exact kernel count.
+option(NSX_EXECUTORCH_TEST_LINK_CHECK
+  "Link nsx_executorch's kernel registration libraries into a bare executable" OFF)
+if(NSX_EXECUTORCH_TEST_LINK_CHECK)
+  get_property(_nsx_executorch_test_registrations GLOBAL PROPERTY NSX_EXECUTORCH_REGISTRATION_LIBS)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/link_check.c" "int main(void) { return 0; }\n")
+  add_executable(nsx_executorch_link_check "${CMAKE_CURRENT_BINARY_DIR}/link_check.c")
+  target_link_libraries(nsx_executorch_link_check PRIVATE nsx::board_flags executorch)
+  if(_nsx_executorch_test_registrations)
+    # Whole, by hand: CMake's WHOLE_ARCHIVE link feature is not defined for a
+    # Generic (bare-metal) system. Each library is also linked by name, for the
+    # kernel libraries it depends on.
+    set(_nsx_executorch_test_whole "")
+    foreach(_lib IN LISTS _nsx_executorch_test_registrations)
+      list(APPEND _nsx_executorch_test_whole "$<TARGET_FILE:${_lib}>")
+    endforeach()
+    target_link_libraries(nsx_executorch_link_check PRIVATE
+      -Wl,--whole-archive ${_nsx_executorch_test_whole} -Wl,--no-whole-archive
+      ${_nsx_executorch_test_registrations})
+  endif()
+  # The board flags are compile options only; the link needs the same ABI to pick the matching libc.
+  target_link_options(nsx_executorch_link_check PRIVATE
+    -mthumb "-mcpu=${NSX_EXECUTORCH_TEST_CPU}"
+    $<$<STREQUAL:${NSX_EXECUTORCH_TEST_CPU},cortex-m55>:-mfloat-abi=hard>
+    --specs=nosys.specs -Wl,--gc-sections)
+  add_dependencies(nsx_executorch_link_check nsx_executorch_kernel_count)
+endif()
