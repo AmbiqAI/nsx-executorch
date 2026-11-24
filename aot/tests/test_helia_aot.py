@@ -292,6 +292,20 @@ def test_unsupported_ops_stay_in_executorch(tmp_path):
     assert not any("conv" in op for op in ops["cortex_m"] + ops["cortex_m_ns"])
 
 
+def test_a_partition_heliaaot_refuses_at_its_boundary_gives_up_only_the_refused_group(tmp_path):
+    # A zero pad is an alias: with both the convolution's result and the pad's leaving one partition, its two
+    # outputs would be one int8 tensor, which a heliaAOT module cannot return twice. The pad stays in ExecuTorch;
+    # the convolution is still delegated.
+    model = Fn(lambda m, x: (lambda y: (torch.sigmoid(y), F.pad(y, (0, 0, 0, 0))))(m["c"](x)),
+               c=torch.nn.Conv2d(4, 8, 1))
+    inputs = (_cl(1, 4, 6, 6),)
+    result = _delegated(_quantized(model, inputs), inputs, tmp_path)
+    (blob,) = _blobs(result)
+    assert blob.inputs == (TensorContract(1, 144),) and blob.outputs == (TensorContract(1, 288),)
+    ops = build_manifest(result, result.executorch_program.buffer, "ns")["operators"]
+    assert "cortex_m::pad.out" in ops["cortex_m"] and "cortex_m::quantized_conv2d.out" not in ops["cortex_m"]
+
+
 def test_each_partition_is_named_by_the_saved_program(tmp_path):
     # The quantized program is saved next to the modules; each partition's module name and heliaAOT plan name it by
     # that file's SHA-256 and the partition's index, so a plan made for a partition matches the same file again.
@@ -307,8 +321,11 @@ def test_each_partition_is_named_by_the_saved_program(tmp_path):
     digest = hashlib.sha256(saved.read_bytes()).hexdigest()
     assert saved.name == f"haot_{digest[:10]}.pt2"
     assert torch.export.load(saved) is not None  # the program itself: helia-torch compile can rebuild from it
-    modules = sorted(blob.module for blob in _blobs(result))
+    blobs = sorted(_blobs(result), key=lambda blob: blob.module)
+    modules = [blob.module for blob in blobs]
     assert modules == [f"haot_{digest[:10]}_0", f"haot_{digest[:10]}_1"]
+    # Numbered in graph order: partition 0 is the first convolution (4 x 6 x 6 in), 1 the second (8 x 6 x 6 in).
+    assert [blob.inputs for blob in blobs] == [(TensorContract(1, 144),), (TensorContract(1, 288),)]
     for index, module in enumerate(modules):
         plan = json.loads((tmp_path / module / f"{module}_plan.json").read_text())
         assert plan["model"] == {"file": saved.name, "sha256": digest, "subgraph": index}

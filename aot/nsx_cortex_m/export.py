@@ -332,7 +332,9 @@ def _lower_with_helia_aot(edge_manager, options, target_config, source):
 
     # Before partitioning, not in the partitioner: ExecuTorch refuses a partitioner that changes the graph.
     duplicate_dequantizes(edge_manager.exported_program().graph_module)
-    edge_manager = edge_manager.to_backend(HeliaAotPartitioner(options, source))
+    edge_manager = edge_manager.to_backend(
+        HeliaAotPartitioner(options, source, edge_manager.exported_program())
+    )
     # Consumers that all stayed in ExecuTorch share one dequantize again.
     merge_dequantizes(edge_manager.exported_program().graph_module)
     edge_manager._edge_programs["forward"] = NsCortexMPassManager(
