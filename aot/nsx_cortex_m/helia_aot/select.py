@@ -56,6 +56,7 @@ def build(
     calibration_samples: Optional[Sequence[tuple[Any, ...]]] = None,
     target_config=None,
     int8_io: bool = False,
+    test_inputs: Optional[Sequence[Any]] = None,
 ) -> HeliaAotBuild:
     """Compile `model` with heliaAOT, as a plain module when it can and through ExecuTorch otherwise.
 
@@ -64,6 +65,7 @@ def build(
     one path. A float model is quantized once (ns quantizer, `calibration_samples`) and lowered to the edge
     dialect once, so both paths see the same program. `name` names the plain module; `int8_io` applies to the
     delegate's PTE (a plain module's boundary is always int8).
+    `test_inputs` give a plain module heliaAOT's test case (see compile_model); a delegate build has none.
 
     Raises NotFullyDelegableError when mode="module" and heliaAOT cannot compile the whole model, ValueError
     when `name` is not a C identifier, and heliaAOT's own error when it cannot compile what the chosen path gives
@@ -83,7 +85,7 @@ def build(
     rejected: dict[str, str] = {}
     if mode != DELEGATE:
         try:
-            compiled = _compile_quantized(program, edge_manager.exported_program(), options, name)
+            compiled = _compile_quantized(program, edge_manager.exported_program(), options, name, test_inputs)
         except NotFullyDelegableError as exc:
             if mode == MODULE:
                 raise

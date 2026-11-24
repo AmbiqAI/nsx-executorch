@@ -17,6 +17,10 @@
 # layout; CompiledModel.inputs/outputs give the scales, zero points and
 # layouts to (de)quantize with.
 #
+# With test_inputs, the module also carries heliaAOT's test case: the inputs and
+# the outputs the model's reference kernels compute for them (golden_arrays),
+# which the generated <name>_test_case code runs and checks on the target.
+#
 # A model with any operator heliaAOT cannot compile is refused
 # (NotFullyDelegableError lists them); export(..., helia_aot=...) handles such
 # models, leaving those operators in ExecuTorch.
@@ -25,7 +29,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -109,6 +113,7 @@ class CompiledModel:
     inputs: list[IoTensor]
     outputs: list[IoTensor]
     air: Any = field(repr=False, default=None)
+    golden_data: Optional[Path] = None  # the test case's inputs and expected outputs, when one was asked for
 
     def manifest(self) -> dict:
         return {
@@ -199,6 +204,40 @@ def _air_program(edge_program, name: str) -> AirProgram:
     )
 
 
+def golden_arrays(
+    quantized: torch.export.ExportedProgram,
+    inputs: Sequence[IoTensor],
+    outputs: Sequence[IoTensor],
+    test_inputs: Sequence[torch.Tensor],
+) -> dict[str, Any]:
+    """One test case for a compiled module, as heliaAOT's golden data: ``input_N`` and ``output_N`` int8 arrays.
+
+    `test_inputs` are float tensors in the model's logical shapes. The inputs are quantized as the module's
+    boundary is (IoTensor.quantize). The expected outputs are what the model's reference kernels compute for
+    them: the quantized program lowered for the ns provider without heliaAOT, which the module matches byte for
+    byte. Running the quantized program in PyTorch instead would not do: its float arithmetic rounds a step or
+    two differently from the integer kernels.
+
+    Two operators' reference kernels round differently from the kernels on the device, by at most one step: an
+    average pool on an exact tie, and a mean over a channels_last tensor. heliaAOT's default test tolerance of
+    one step covers them.
+    """
+    from ..export import export
+
+    test_inputs = tuple(test_inputs)
+    if len(test_inputs) != len(inputs):
+        raise ValueError(f"the model has {len(inputs)} input(s), but {len(test_inputs)} test input(s) were given")
+    for index, (spec, x) in enumerate(zip(inputs, test_inputs)):
+        if tuple(x.shape) != tuple(spec.shape):
+            raise ValueError(f"test input {index} has shape {tuple(x.shape)}, but the model's is {spec.shape}")
+    reference = export(quantized, test_inputs, kernel_provider="ns").edge_module
+    expected = reference(*test_inputs)
+    expected = expected if isinstance(expected, (tuple, list)) else (expected,)
+    arrays = {f"input_{i}": spec.quantize(x).numpy() for i, (spec, x) in enumerate(zip(inputs, test_inputs))}
+    arrays.update({f"output_{i}": spec.quantize(y).numpy() for i, (spec, y) in enumerate(zip(outputs, expected))})
+    return arrays
+
+
 def compile_model(
     model: "torch.nn.Module | torch.export.ExportedProgram",
     example_inputs: Optional[tuple[Any, ...]],
@@ -206,6 +245,7 @@ def compile_model(
     *,
     name: Optional[str] = None,
     calibration_samples: Optional[Sequence[tuple[Any, ...]]] = None,
+    test_inputs: Optional[Sequence[torch.Tensor]] = None,
 ) -> CompiledModel:
     """Compile a whole model to one heliaAOT NSX module, with no ExecuTorch runtime.
 
@@ -215,10 +255,15 @@ def compile_model(
     as <options.output_dir>/<options.module_prefix>_<digest>.pt2, and heliaAOT's plan names the model by that file.
     The file is reproducible (see codegen.save_program), so compiling the same quantized model again gives the
     same name.
+
+    With `test_inputs` (one float tensor per model input), the module also gets heliaAOT's test case, which runs
+    those inputs and checks the outputs on the target. Its data is saved as <options.output_dir>/<name>_golden.npz
+    (see golden_arrays) and given to heliaAOT as test.golden_data; a ``test`` entry in `options.extra` can set the
+    test's other settings, such as its tolerance.
     """
     check_module_name(name)
     quantized = _quantized_program(model, example_inputs, "ns", calibration_samples)
-    return _compile_quantized(quantized, _edge_program(quantized, None, "ns", None), options, name)
+    return _compile_quantized(quantized, _edge_program(quantized, None, "ns", None), options, name, test_inputs)
 
 
 def check_module_name(name: Optional[str]) -> None:
@@ -227,16 +272,26 @@ def check_module_name(name: Optional[str]) -> None:
         raise ValueError(f"module name {name!r} is not a C identifier")
 
 
-def _compile_quantized(quantized, edge_program, options: HeliaAotOptions, name: Optional[str]) -> CompiledModel:
+def _compile_quantized(
+    quantized, edge_program, options: HeliaAotOptions, name: Optional[str], test_inputs=None
+) -> CompiledModel:
     """compile_model() of a quantized program whose edge program the caller already has (build() lowers a
     model to the edge dialect once, for either path)."""
+    import numpy as np
+
     from .codegen import save_program
 
     program = _air_program(edge_program, name or "model")  # refuses a model it does not cover, writing nothing
     source = save_program(quantized, options)  # the whole program: partition 0 of its file
     name = name or module_name_for(source, options.module_prefix)
+    golden_data = None
+    if test_inputs is not None:
+        golden_data = Path(options.output_dir).expanduser().resolve() / f"{name}_golden.npz"
+        np.savez(golden_data, **golden_arrays(quantized, program.inputs, program.outputs, test_inputs))
+        test = {**options.extra.get("test", {}), "enabled": True, "golden_data": golden_data}
+        options = replace(options, extra={**options.extra, "test": test})
     module_dir = generate_module(program.air, options, name, source, executorch_registration=False)
     compiled = CompiledModel(name=name, module_dir=module_dir, inputs=program.inputs, outputs=program.outputs,
-                             air=program.air)
+                             air=program.air, golden_data=golden_data)
     compiled.write_manifest()
     return compiled
