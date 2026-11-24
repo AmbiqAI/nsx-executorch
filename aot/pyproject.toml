@@ -25,6 +25,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # ExecuTorch delegate that compiles supported subgraphs with heliaAOT (nsx_cortex_m.helia_aot).
+# It needs heliaAOT's PT2E front end, which no release has yet (AmbiqAI/helia-aot#984): raise the floor to the
+# first release that does, and cap it at the next minor, since the front end is provisional.
 helia-aot = ["helia-aot>=1.5,<2"]
 
 [project.scripts]

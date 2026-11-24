@@ -279,7 +279,7 @@ def test_a_partition_heliaaot_refuses_at_its_boundary_gives_up_only_the_refused_
 
 def test_each_partition_is_named_by_the_saved_program(tmp_path):
     # The quantized program is saved next to the modules; each partition's module name and heliaAOT plan name it by
-    # that file's SHA-256 and the partition's index, so a plan made for a partition matches the same file again.
+    # that file's SHA-256 and the partition's index, so the plan records which program each module came from.
     import hashlib
     import json
 
@@ -291,7 +291,7 @@ def test_each_partition_is_named_by_the_saved_program(tmp_path):
     (saved,) = tmp_path.glob("haot_*.pt2")
     digest = hashlib.sha256(saved.read_bytes()).hexdigest()
     assert saved.name == f"haot_{digest[:10]}.pt2"
-    assert torch.export.load(saved) is not None  # the program itself: helia-torch compile can rebuild from it
+    assert torch.export.load(saved) is not None  # the program itself, which loads
     blobs = sorted(_blobs(result), key=lambda blob: blob.module)
     modules = [blob.module for blob in blobs]
     assert modules == [f"haot_{digest[:10]}_0", f"haot_{digest[:10]}_1"]

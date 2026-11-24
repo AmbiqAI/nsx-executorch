@@ -125,8 +125,10 @@ def save_program(program, options: HeliaAotOptions) -> ProgramSource:
     """Save the quantized program the delegate converts to ``output_dir`` and return its file's source.
 
     Each delegated partition is a part of this file: heliaAOT's plan names the partition by the file's name, the
-    SHA-256 of its bytes and the partition's index, so a plan made for it matches the same file again. heliaAOT
-    takes the SHA-256 itself, from the file ``model.path`` names when the partition is converted.
+    SHA-256 of its bytes and the partition's index, so the plan records which program the module came from.
+    heliaAOT takes the SHA-256 itself, from the file ``model.path`` names when the partition is converted. The file
+    identifies the program, not how to rebuild the modules: they are converted from the edge-dialect partitions,
+    whose tensor and operator names come from the module paths this file leaves out.
 
     The file, ``<prefix>_<digest>.pt2``, is the program without its debug metadata (``_DEBUG_METADATA``): the same
     quantized program then always saves to the same bytes, so exporting a model again gives the same digest, file

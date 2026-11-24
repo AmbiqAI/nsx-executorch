@@ -197,7 +197,7 @@ result.write_pte("model.pte")
 
 **What gets delegated.** The partitioner runs on the quantized edge program before the NS passes, where each
 int8 operator is still `dequantize -> aten op -> quantize`. heliaAOT's PT2E front end
-(`helia_aot.converters.pt2e`, heliaAOT ≥ 1.5) decides support group by group and converts the partitions, so the
+(`helia_aot.converters.pt2e`, not yet in a heliaAOT release: AmbiqAI/helia-aot#984) decides support group by group and converts the partitions, so the
 partitioner claims exactly what converts. In int8, that covers:
 
 - convolution, depthwise and transposed convolution;
@@ -215,11 +215,14 @@ stays in ExecuTorch and lowers through the NS passes as usual.
 
 - **The quantized program**, saved as `output_dir/haot_<digest>.pt2`. heliaAOT's plan for each partition names
   the model by this file (its name and the SHA-256 of its bytes, which `shasum -a 256` reproduces) and the
-  partition's index, so a plan made for a partition matches the same file again. The file is the program without
+  partition's index, so the plan records which program each module came from. The file is the program without
   its debug metadata (stack traces and module paths, which PyTorch writes differently on every export), so
   exporting the same quantized model again gives the same file, digest and module names; a model that differs in
-  any weight or operator gets others. It loads with `torch.export.load()`, and `helia-torch compile` rebuilds from
-  it. `HeliaAotOptions(debug_program=True)` also saves `haot_<digest>.debug.pt2`, the program with that metadata.
+  any weight or operator gets others. It loads with `torch.export.load()`. It identifies the program; it is not a
+  recipe for the modules: heliaAOT converts the edge-dialect partitions, and names their tensors and operators
+  after the module paths the file leaves out, so exporting the loaded file again gives another file and other
+  module names. `HeliaAotOptions(debug_program=True)` also saves `haot_<digest>.debug.pt2`, the program with that
+  metadata.
 - **One heliaAOT NSX module per partition** in `output_dir`, named `haot_<digest>_<partition>` after that file.
   Each module includes `et/<name>_et_registration.c`, which registers the module with the runtime.
 - **The PTE.** It holds only the delegate blob (module name and int8 tensor contract), not the compiled code.
@@ -266,8 +269,10 @@ provider is rejected, because heliaAOT modules link ns-cmsis-nn). List the gener
   lowering a float-boundary program to `HeliaAotBackend` directly is refused.
 - **Transposed convolution** needs `output_padding == 0`, `groups == 1` and no dilation.
 - **Profiling.** A delegate reports as one operator event (`HeliaAotBackend`).
-- **heliaAOT version.** The generated modules need the heliaAOT version helia-torch was installed with
-  (`helia-aot>=1.5,<2`).
+- **heliaAOT version.** The delegate needs heliaAOT's PT2E front end, which no heliaAOT release has yet
+  (AmbiqAI/helia-aot#984). Until one does, install heliaAOT from that branch: the `helia-aot` extra's
+  `helia-aot>=1.5,<2` installs a release without it, where `export(helia_aot=...)` fails at import and the
+  delegate tests skip. The generated modules need the heliaAOT version they were generated with.
 
 ## Source setup and validation
 
