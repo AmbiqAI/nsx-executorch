@@ -602,10 +602,13 @@ def test_io_tensor_quantize_matches_the_boundary_kernel(tmp_path):
     kernel = torch.ops.cortex_m.quantize_per_tensor(dense, x_spec.scale, x_spec.zero_point, x_spec.qmin,
                                                     x_spec.qmax, torch.int8)
     assert torch.equal(x_spec.quantize(dense), kernel.permute(x_spec.dim_order).contiguous())
+    # dequantize() reads the module's bytes (physical layout) as the boundary kernel reads the logical tensor.
     (y_spec,) = compiled.outputs
     q = torch.randint(-128, 128, y_spec.physical_shape, dtype=torch.int8)
-    inverse = [y_spec.dim_order.index(d) for d in range(4)]
-    assert torch.equal(y_spec.dequantize(q), (q.permute(inverse).float() - y_spec.zero_point) * y_spec.scale)
+    logical = q.permute([y_spec.dim_order.index(d) for d in range(len(y_spec.dim_order))])
+    kernel = torch.ops.cortex_m.dequantize_per_tensor(logical, y_spec.scale, y_spec.zero_point, y_spec.qmin,
+                                                      y_spec.qmax, torch.int8)
+    assert y_spec.dequantize(q).shape == kernel.shape and torch.equal(y_spec.dequantize(q), kernel)
 
 
 def test_compile_model_refuses_a_partially_supported_model(tmp_path):
