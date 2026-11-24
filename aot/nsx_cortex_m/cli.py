@@ -11,7 +11,8 @@
 #
 # A float32 .pt2 is PT2E-quantized here (--calibrate) before lowering; an
 # already-INT8 .pt2 skips quantization and goes straight to kernel matching.
-# Both take the same export() path as the Python API.
+# Both take the same export() path as the Python API. --no-quantize lowers a
+# float .pt2 as it is, in its own dtype, on ExecuTorch's portable kernels.
 #
 # With the ns provider and heliaAOT installed (the helia-aot extra), compile
 # uses heliaAOT by default (--helia-aot auto): a model heliaAOT fully covers
@@ -152,7 +153,7 @@ def _helia_aot_mode(args: argparse.Namespace) -> str:
     return mode
 
 
-def _write_pte(result, output: Path, provider: str) -> None:
+def _write_pte(result, output: Path, provider: str, quantized: bool = True) -> None:
     from .manifest import load_sidecar, lowering_report
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +161,13 @@ def _write_pte(result, output: Path, provider: str) -> None:
     manifest = load_sidecar(output)
     print(f"wrote {output} and {output}.json")
     print(lowering_report(manifest))
-    if manifest["operators"]["portable"] and provider == "ns":
+    if not quantized:
+        print(
+            "note: the model is not quantized, so every operator runs on the portable kernels "
+            "in the model's own dtype.",
+            file=sys.stderr,
+        )
+    elif manifest["operators"]["portable"] and provider == "ns":
         print(
             "note: portable ops above stayed on the standard float kernels "
             "(an NS qualifier declined them); see the ns lowering rules.",
@@ -237,8 +244,10 @@ def _compile_with_helia_aot(args, quantized, example, mode: str, output: Path) -
 def _cmd_compile(args: argparse.Namespace) -> int:
     from . import export, is_pt2e_quantized, quantize
 
-    mode = _helia_aot_mode(args)
     exported, example = _load_pt2(args.model)
+    if args.no_quantize and not is_pt2e_quantized(exported):
+        return _compile_unquantized(args, exported, example)
+    mode = _helia_aot_mode(args)
     if is_pt2e_quantized(exported):
         if args.calibrate is not None:
             raise SystemExit(
@@ -268,6 +277,33 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compile_unquantized(args: argparse.Namespace, exported, example) -> int:
+    """compile --no-quantize of a float model: a PTE in the model's own dtype, without heliaAOT."""
+    from . import export
+
+    needs_int8 = [
+        flag
+        for flag, given in (
+            ("--calibrate", args.calibrate is not None),
+            ("--int8-io", args.int8_io),
+            (f"--helia-aot {args.helia_aot}", args.helia_aot in ("module", "delegate")),
+            # heliaAOT's own outputs, which a float model does not get.
+            ("--test-case", args.test_case is not None),
+            ("--name", args.name is not None),
+            ("--debug-program", args.debug_program),
+        )
+        if given
+    ]
+    if needs_int8:
+        raise SystemExit(
+            f"{args.model} is a float model and --no-quantize keeps it that way, but "
+            f"{', '.join(needs_int8)} needs an int8 model (heliaAOT compiles int8 models only)."
+        )
+    result = export(exported, example, kernel_provider=args.provider, quantize_model=False)
+    _write_pte(result, args.output or args.model.with_suffix(".pte"), args.provider, quantized=False)
+    return 0
+
+
 def _cmd_inspect(args: argparse.Namespace) -> int:
     from .manifest import load_sidecar
 
@@ -294,8 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     compile_parser = subparsers.add_parser(
         "compile",
         help=(
-            "Quantize (if float) and lower a torch.export .pt2 file to a "
-            ".pte + sidecar; INT8 .pt2 inputs are lowered as-is"
+            "Quantize (if float, unless --no-quantize) and lower a torch.export .pt2 "
+            "file to a .pte + sidecar; INT8 .pt2 inputs are lowered as-is"
         ),
     )
     compile_parser.add_argument(
@@ -314,6 +350,17 @@ def main(argv: list[str] | None = None) -> int:
             "Quantization calibration for float inputs: 'random:N' or an "
             ".npz of sample batches (default: random:8); invalid for "
             "already-quantized inputs"
+        ),
+    )
+    compile_parser.add_argument(
+        "--no-quantize",
+        action="store_true",
+        help=(
+            "Do not quantize a float model: lower it in its own dtype (float32, or float16 / "
+            "bfloat16 if the model was cast before torch.export) on ExecuTorch's portable "
+            "kernels, without heliaAOT. --calibrate, --int8-io, --helia-aot module / "
+            "delegate and heliaAOT's --test-case, --name and --debug-program need an int8 "
+            "model; an already-quantized .pt2 lowers as usual"
         ),
     )
     compile_parser.add_argument(

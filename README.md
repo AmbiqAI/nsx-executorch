@@ -159,6 +159,15 @@ a test case that checks its outputs on the target (see
 [compile_model](#whole-model-in-heliaaot-without-executorch-compile_model)). `build()` in
 `nsx_cortex_m.helia_aot` is the Python equivalent.
 
+`--no-quantize` lowers a float model as it is, without quantization or heliaAOT: a PTE in the model's own dtype in
+which every operator runs on ExecuTorch's portable kernels (`export(..., quantize_model=False)` in Python). The
+dtype is whatever the `.pt2` was exported with, so a model cast with `model.to(torch.float16)` or
+`torch.bfloat16` before `torch.export` gives a float16 or bfloat16 PTE, with float16 or bfloat16 inputs and
+outputs. That halves the weights and activations; the portable kernels do each half-precision operation in
+float32, so expect no speed-up (not measured on a board). `--calibrate`, `--int8-io`, `--helia-aot module` /
+`delegate` and heliaAOT's `--test-case`, `--name` and `--debug-program` need an int8 model and are refused; an
+already-quantized `.pt2` lowers as usual.
+
 A PTE build writes `model.pte` plus a `model.pte.json` sidecar (schema
 `nsx-executorch.pte-manifest/1`), SHA-256-bound to that exact PTE. The
 sidecar records everything a target build needs to register the right
