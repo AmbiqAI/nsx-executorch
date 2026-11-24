@@ -27,7 +27,8 @@ from pathlib import Path
 import pytest
 import torch
 
-# The delegate needs heliaAOT's PT2E front end (helia-aot >= 1.5); an older heliaAOT skips these tests too.
+# The delegate needs heliaAOT's PT2E front end (no release has it yet: AmbiqAI/helia-aot#984); without it these
+# tests skip. test_helia_aot_runtime.py holds the ones that need no heliaAOT.
 pytest.importorskip("helia_aot.converters.pt2e")
 
 from executorch.backends.cortex_m.target_config import CortexM, CortexMTargetConfig  # noqa: E402
@@ -179,20 +180,6 @@ def _blobs(result) -> list[DelegateBlob]:
 # -- unit tests -----------------------------------------------------------------------------------------------
 
 
-def test_blob_round_trip():
-    blob = DelegateBlob("haot_0123456789", (TensorContract(1, 490),), (TensorContract(1, 12), TensorContract(6, 48)))
-    packed = blob.pack()
-    assert packed[:4] == b"HAOT" and len(packed) % 4 == 0
-    assert DelegateBlob.unpack(packed) == blob
-
-
-def test_a_module_name_the_runtime_cannot_read_fails_the_export():
-    # src/helia_aot_backend.cpp reads names of up to 63 bytes; a longer one must not reach a device.
-    assert DelegateBlob("m" * 63, (), ()).pack()
-    with pytest.raises(ValueError, match="shorter module_prefix"):
-        DelegateBlob("m" * 64, (), ()).pack()
-
-
 def test_a_partition_with_a_float_boundary_is_not_a_delegate(tmp_path):
     # Lowered directly, without the partitioner, the program takes and returns float tensors. heliaAOT would
     # import it (its int8 boundary is inside), but the runtime copies the ExecuTorch tensors as they are.
@@ -209,32 +196,6 @@ def test_a_partition_with_a_float_boundary_is_not_a_delegate(tmp_path):
     with pytest.raises(ValueError, match="is torch.float32, not int8"):
         HeliaAotBackend.preprocess(edge, specs)
     assert [p.name for p in tmp_path.iterdir()] == ["model.pt2"]  # refused before heliaAOT wrote a module
-
-
-def test_the_registry_counts_the_modules_it_turned_away(tmp_path):
-    # Modules register from constructors, where nothing can report a failure: the registry keeps the count for
-    # HeliaAotBackend to report when a PTE names a module it cannot find.
-    cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
-    if cc is None:
-        pytest.skip("no host C compiler")
-    main = tmp_path / "main.c"
-    main.write_text(
-        '#include "nsx_helia_aot.h"\n'
-        "int main(void) {\n"
-        '    static const nsx_helia_aot_model_t a = {.name = "a"}, b = {.name = "b"}, c = {.name = "c"};\n'
-        "    if (nsx_helia_aot_register(&a) != 0 || nsx_helia_aot_register(&b) != 0) return 1;\n"
-        "    if (nsx_helia_aot_register(&a) != 0 || nsx_helia_aot_dropped() != 0) return 2;\n"
-        "    if (nsx_helia_aot_register(&c) != -1 || nsx_helia_aot_dropped() != 1) return 3;\n"
-        '    if (nsx_helia_aot_find("c") != 0 || nsx_helia_aot_capacity() != 2) return 4;\n'
-        "    return 0;\n"
-        "}\n"
-    )
-    exe = tmp_path / "registry"
-    subprocess.run([
-        cc, "-std=c11", "-DNSX_HELIA_AOT_MAX_MODELS=2", f"-I{REPO / 'includes-api'}", str(main),
-        str(REPO / "src" / "nsx_helia_aot_registry.c"), "-o", str(exe),
-    ], check=True)
-    assert subprocess.run([str(exe)]).returncode == 0
 
 
 def test_the_lowering_report_says_what_the_firmware_must_link(tmp_path):
@@ -284,11 +245,7 @@ def test_int8_io_hands_the_delegate_the_programs_own_int8_boundary(tmp_path):
 
 
 def test_extra_settings_reach_heliaaot(tmp_path):
-    # The backend rebuilds its options from the compile specs, so extra must travel in them.
-    from nsx_cortex_m.helia_aot.codegen import compile_specs_for, options_from_specs
-
-    opts = HeliaAotOptions(output_dir=tmp_path, extra={"module": {"schedule": "static"}})
-    assert options_from_specs(compile_specs_for(opts)).extra == {"module": {"schedule": "static"}}
+    # The backend rebuilds its options from the compile specs (test_helia_aot_runtime.py checks the round trip).
     model, inputs = CASES["conv1x1"]
     with pytest.raises(ValueError, match="unknown key 'no_such_setting'"):
         export(_quantized(model, inputs), inputs, kernel_provider="ns", target_config=TARGET,
