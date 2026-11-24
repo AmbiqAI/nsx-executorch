@@ -136,6 +136,7 @@ def save_program(program, options: HeliaAotOptions) -> ProgramSource:
     and its bytes differ from one export to the next.
     """
     import copy
+    import tempfile
 
     import torch
 
@@ -145,11 +146,14 @@ def save_program(program, options: HeliaAotOptions) -> ProgramSource:
     for node in reproducible.graph.nodes:
         for key in _DEBUG_METADATA:
             node.meta.pop(key, None)
-    staging = out_dir / f".{options.module_prefix}_program.pt2.tmp"
-    torch.export.save(reproducible, staging)
-    digest = ProgramSource(staging).sha256  # the file is named for its own digest, which heliaAOT takes too
-    saved = out_dir / f"{options.module_prefix}_{digest[:10]}.pt2"
-    staging.replace(saved)
+    # Staged in a directory of its own, so exports into one output_dir do not overwrite each other's file, and
+    # under a fixed name: the archive records its file's name, which is then part of the digest.
+    with tempfile.TemporaryDirectory(prefix=f".{options.module_prefix}_", dir=out_dir) as staging_dir:
+        staging = Path(staging_dir) / f"{options.module_prefix}_program.pt2"
+        torch.export.save(reproducible, staging)
+        digest = ProgramSource(staging).sha256  # the file is named for its own digest, which heliaAOT takes too
+        saved = out_dir / f"{options.module_prefix}_{digest[:10]}.pt2"
+        staging.replace(saved)
     if options.debug_program:
         torch.export.save(program, saved.with_suffix(".debug.pt2"))
     return ProgramSource(saved)
