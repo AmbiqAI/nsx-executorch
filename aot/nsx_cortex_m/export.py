@@ -229,7 +229,6 @@ def export(
     portable fallback path (with the matching select-ops list value).
     """
     _check_kernel_provider(kernel_provider)
-    pass_manager_cls = NsCortexMPassManager if kernel_provider == "ns" else CortexMPassManager
 
     exported = _as_exported_program(model, example_inputs)
     if is_pt2e_quantized(exported):
@@ -248,7 +247,14 @@ def export(
             calibration_samples=calibration_samples,
         )
     edge_manager = to_edge(final_export, compile_config=_stock_edge_compile_config())
+    return _lower_edge(final_export, edge_manager, kernel_provider, target_config, int8_io, helia_aot)
 
+
+def _lower_edge(final_export, edge_manager, kernel_provider, target_config, int8_io, helia_aot) -> ExportResult:
+    """export() from the edge program on: `final_export` is the quantized program and `edge_manager` its
+    to_edge() result, which this lowers in place. helia_aot.build() calls it with the edge program it has
+    already imported, so a model is lowered to the edge dialect once."""
+    pass_manager_cls = NsCortexMPassManager if kernel_provider == "ns" else CortexMPassManager
     io_qparams: dict = {}
     if int8_io:
         # Must run while the boundary ops are still quantized_decomposed
